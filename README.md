@@ -77,7 +77,7 @@ git commit -m "chore: update yamem"
 | Claude Code | `.claude/skills/`  | `mkdir -p .claude/skills && ln -s ../../.agents/skills/memory .claude/skills/memory` |
 | Codex       | `.codex/skills/`   | `mkdir -p .codex/skills && ln -s ../../.agents/skills/memory .codex/skills/memory`  |
 | Cursor      | `.cursor/skills/`  | `mkdir -p .cursor/skills && ln -s ../../.agents/skills/memory .cursor/skills/memory` |
-| Другие      | Зависит от агента  | Создай симлинк по аналогии или укажи путь в system prompt            |
+| Другие      | Зависит от агента  | Создать симлинк по аналогии или указать путь в system prompt         |
 
 
 ## Системный промпт
@@ -85,7 +85,7 @@ git commit -m "chore: update yamem"
 Добавить строку для надёжности (работает для любого агента):
 
 ```text
-Если в проекте есть .agents/skills/memory/SKILL.md, прочитай его в начале работы и выполни стартовые инструкции.
+Если в проекте есть .agents/skills/memory/SKILL.md, прочитать его в начале работы и выполнить стартовые инструкции.
 ```
 
 ## Важное поведение
@@ -103,9 +103,9 @@ git commit -m "chore: update yamem"
 
 ## Безопасность
 
-- Не храни пароли и секреты в памяти.
-- Секреты держи в `.env` или другом внешнем хранилище.
-- В памяти записывай только имя переменной или описание, где искать секрет.
+- Не хранить пароли и секреты в памяти.
+- Секреты хранить в `.env` или другом внешнем хранилище.
+- В памяти записывать только имя переменной или описание, где искать секрет.
 
 ## Минимальный рабочий минимум
 

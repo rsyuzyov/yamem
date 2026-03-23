@@ -69,34 +69,16 @@ git commit -m "chore: update yamem"
 
 ## Подключение к агентам
 
-Навык хранится в `.agents/skills/memory/`. Каждый агент читает навыки из своей папки — нужно создать симлинк.
+Навык хранится в `.agents/skills/memory/`. Каждый агент читает навыки из своей папки.
 
-### Antigravity
+| Агент       | Папка навыков      | Команда                                                              |
+| ----------- | ------------------ | -------------------------------------------------------------------- |
+| Antigravity | `.agents/skills/`  | Ничего не нужно — читает напрямую                                    |
+| Claude Code | `.claude/skills/`  | `mkdir -p .claude/skills && ln -s ../../.agents/skills/memory .claude/skills/memory` |
+| Codex       | `.codex/skills/`   | `mkdir -p .codex/skills && ln -s ../../.agents/skills/memory .codex/skills/memory`  |
+| Cursor      | `.cursor/skills/`  | `mkdir -p .cursor/skills && ln -s ../../.agents/skills/memory .cursor/skills/memory` |
+| Другие      | Зависит от агента  | Создай симлинк по аналогии или укажи путь в system prompt            |
 
-Ничего дополнительно не нужно — Antigravity читает навыки из `.agents/skills/` напрямую.
-
-### Claude Code
-
-```bash
-mkdir -p .claude/skills
-ln -s ../../.agents/skills/memory .claude/skills/memory
-```
-
-### Codex
-
-```bash
-mkdir -p .codex/skills
-ln -s ../../.agents/skills/memory .codex/skills/memory
-```
-
-### Cursor / другой агент с кастомной папкой навыков
-
-```bash
-mkdir -p .cursor/skills          # замени на нужный путь
-ln -s ../../.agents/skills/memory .cursor/skills/memory
-```
-
-Если агент не поддерживает папку навыков — укажи путь в system prompt (см. ниже).
 
 ## Системный промпт
 

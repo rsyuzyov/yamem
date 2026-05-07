@@ -1,0 +1,10 @@
+{
+  "name": "yamem",
+  "version": "0.1.0",
+  "description": "Навык примитивной универсальной памяти для большинства популярных ai-агентов",
+  "author": {
+    "name": "rsyuzyov",
+    "url": "https://github.com/rsyuzyov"
+  },
+  "homepage": "https://github.com/rsyuzyov/yamem"
+}

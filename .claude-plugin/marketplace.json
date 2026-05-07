@@ -1,0 +1,14 @@
+{
+  "name": "yamem",
+  "owner": {
+    "name": "rsyuzyov",
+    "url": "https://github.com/rsyuzyov"
+  },
+  "plugins": [
+    {
+      "name": "yamem",
+      "source": "./",
+      "description": "Навык примитивной универсальной памяти для большинства популярных ai-агентов"
+    }
+  ]
+}

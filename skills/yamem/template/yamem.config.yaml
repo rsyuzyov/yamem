@@ -1,0 +1,22 @@
+# yamem — конфигурация памяти проекта.
+# Значения ниже — дефолты; правь под проект.
+
+enable: true              # false/off — навык в сессии не применять (kill-switch)
+
+local:
+  path: local             # каталог локальной памяти (относительно .agents/memory/)
+  type: directory         # directory | submodule
+  pull_on_start: true     # git pull при старте (если submodule)
+  commit_on_update: false # git commit при обновлении памяти (если git)
+
+diary_read_days: 7        # сколько дней дневника читать (заголовки) при старте
+diary_archive_days: 60    # дневники старше — в diary/archive/YYYY-MM/
+
+optimization:
+  interval_days: 7        # напоминать об уборке, если давно не делали
+
+# Общие обезличенные базы (без секретов). Пусто, если не используешь.
+shared: []
+  # - name: admin-recipes
+  #   path: shared/admin-recipes
+  #   type: submodule      # submodule | directory

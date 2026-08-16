@@ -67,21 +67,23 @@ def read_config(mem: Path) -> dict:
     text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
 
     items = _list_items(text, "banks")
-    if items is not None:
-        return {"journal": mem, "banks": [
-            (i.get("name", "?"), mem / i.get("path", ""),
-             truthy(i.get("pull_on_start", "true"))) for i in items
-        ]}
+    if items is None:
+        # ⚠️ Старая раскладка (`local:` + `shared:`) не поддерживается, и промолчать
+        # тут нельзя: без `banks:` скрипты просто не нашли бы топиков и бодро
+        # отчитались бы «0 банков» вместо того, чтобы сказать, что конфиг устарел.
+        if re.search(r"^(local|shared):\s*$", text, re.M):
+            sys.exit(
+                f"{cfg}: конфиг старого формата (`local:` / `shared:`).\n"
+                "Раскладка памяти теперь плоская: журнал проекта в корне памяти,\n"
+                "знание — в banks/. Переведи конфиг на секцию `banks:` и перенеси\n"
+                "local/topics → banks/local/topics, shared/<банк> → banks/<банк>."
+            )
+        items = [{"name": "local", "path": "banks/local"}]
 
-    # ⚠️ Ветка старой раскладки (`local:` + `shared:`) держится только ради окна
-    # переезда на плоскую и снимается, когда памяти в старом виде не остаётся.
-    m = re.search(r"^local:\s*$.*?^\s*path:\s*(\S+)", text, re.M | re.S)
-    journal = mem / (m.group(1) if m else "local")
-    banks = [("local", journal, True)]
-    for i in _list_items(text, "shared") or []:
-        banks.append((i.get("name", "?"), mem / i.get("path", ""),
-                      truthy(i.get("pull_on_start", "true"))))
-    return {"journal": journal, "banks": banks}
+    return {"journal": mem, "banks": [
+        (i.get("name", "?"), mem / i.get("path", ""),
+         truthy(i.get("pull_on_start", "true"))) for i in items
+    ]}
 
 
 def read_banks(mem: Path):

@@ -20,9 +20,10 @@
 (для проверки перед коммитом).
 """
 import argparse
-import re
 import sys
 from pathlib import Path
+
+from yamem_common import parse_frontmatter, read_banks, splice
 
 BEGIN = "<!-- yamem:topics-index:begin -->"
 END = "<!-- yamem:topics-index:end -->"
@@ -36,46 +37,6 @@ TYPE_TITLE = {
     "reference": "Справка — состав, инвентарь, эталоны",
     "incident": "Разборы инцидентов — прецеденты",
 }
-
-
-def parse_frontmatter(path: Path) -> dict:
-    """Плоский YAML-фронтматтер топика. Без зависимостей: ключ: значение."""
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        return {}
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return {}
-    out = {}
-    for line in text[4:end + 1].splitlines():
-        m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2).strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        out[key] = val
-    return out
-
-
-def read_banks(mem: Path):
-    """[(имя банка, каталог банка, путь к topics/)] — local первым."""
-    cfg = mem / "yamem.config.yaml"
-    local_path, shared = "local", []
-    if cfg.is_file():
-        text = cfg.read_text(encoding="utf-8")
-        m = re.search(r"^local:\s*$.*?^\s*path:\s*(\S+)", text, re.M | re.S)
-        if m:
-            local_path = m.group(1)
-        block = re.search(r"^shared:\s*$(.*?)(?=^\S|\Z)", text, re.M | re.S)
-        if block:
-            for name, path in re.findall(
-                r"-\s*name:\s*(\S+)\s*\n\s*path:\s*(\S+)", block.group(1)
-            ):
-                shared.append((name, path))
-    banks = [("local", mem / local_path)]
-    banks += [(name, mem / path) for name, path in shared]
-    return [(n, d, d / "topics") for n, d in banks if (d / "topics").is_dir()]
 
 
 def collect(topics_dir: Path, bank_root: Path):
@@ -120,22 +81,6 @@ def render(groups, link_prefix: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def splice(path: Path, body: str, apply: bool) -> bool:
-    """Подставить body между маркерами. True, если содержимое изменилось."""
-    text = path.read_text(encoding="utf-8")
-    i, j = text.find(BEGIN), text.find(END)
-    if i == -1 or j == -1:
-        sys.exit(f"{path}: нет маркеров {BEGIN} / {END} — добавь их один раз вручную")
-    if j < i:
-        sys.exit(f"{path}: маркер end раньше begin")
-    new = text[:i + len(BEGIN)] + "\n\n" + body + "\n" + text[j:]
-    if new == text:
-        return False
-    if apply:
-        path.write_text(new, encoding="utf-8", newline="\n")
-    return True
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--memory", default=".agents/memory", help="каталог памяти проекта")
@@ -148,7 +93,8 @@ def main():
         sys.exit(f"нет каталога памяти: {mem}")
     banks = read_banks(mem)
     if not banks:
-        sys.exit(f"в {mem} не найдено ни одного банка с topics/")
+        print(f"в {mem} нет ни одного банка с topics/ — индексировать нечего")
+        return
 
     all_groups, complaints, changed = [], [], []
     for name, root, topics in banks:
@@ -165,7 +111,7 @@ def main():
         # ссылки даём относительно каталога local — банки лежат выше по дереву
         prefix = "" if root == local_root else f"../{root.relative_to(mem).as_posix()}/"
         groups.append((title, [(prefix + rel, t, d) for rel, t, d in rows]))
-    if splice(memory_md, render(groups, ""), args.apply):
+    if splice(memory_md, BEGIN, END, render(groups, ""), args.apply):
         changed.append(memory_md)
 
     # 2) свой список в README каждого банка
@@ -173,7 +119,7 @@ def main():
         readme = root / "README.md"
         if not readme.is_file() or BEGIN not in readme.read_text(encoding="utf-8"):
             continue
-        if splice(readme, render([(None, rows)], ""), args.apply):
+        if splice(readme, BEGIN, END, render([(None, rows)], ""), args.apply):
             changed.append(readme)
 
     total = sum(len(rows) for _, rows, _ in all_groups)

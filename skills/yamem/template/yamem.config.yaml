@@ -3,20 +3,25 @@
 
 enable: true              # false/off — навык в сессии не применять (kill-switch)
 
-local:
-  path: local             # каталог локальной памяти (относительно .agents/memory/)
-  type: directory         # directory | submodule
-  pull_on_start: true     # git pull при старте (если submodule)
-  commit_on_update: false # git commit при обновлении памяти (если git)
+# Банки знаний. Первым идёт `local` — банк со своими топиками, он есть в любой
+# установке и отвечает на вопрос «куда класть привязанное к месту, проекту или
+# клиенту». Отчуждаемое знание — в подключённых банках; там ни хостов, ни адресов,
+# ни учёток. Подключение банка: git submodule add <url> .agents/memory/banks/<имя>,
+# затем строка в этом списке — иначе скрипты банк не увидят.
+banks:
+  - name: local
+    path: banks/local
+    type: directory
+    pull_on_start: false
+  # - name: admin-recipes
+  #   path: banks/admin-recipes
+  #   type: submodule       # submodule | directory
+  #   pull_on_start: true
+
+commit_on_update: false   # git commit при обновлении памяти (если это git-репозиторий)
 
 diary_read_days: 7        # сколько дней дневника читать (заголовки) при старте
 diary_archive_days: 60    # дневники старше — в diary/archive/YYYY-MM/
 
 optimization:
   interval_days: 7        # напоминать об уборке, если давно не делали
-
-# Общие обезличенные базы (без секретов). Пусто, если не используешь.
-shared: []
-  # - name: admin-recipes
-  #   path: shared/admin-recipes
-  #   type: submodule      # submodule | directory

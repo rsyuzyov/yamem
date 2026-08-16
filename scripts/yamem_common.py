@@ -30,36 +30,69 @@ def parse_frontmatter(path: Path) -> dict:
     return out
 
 
-def read_config(mem: Path):
-    """(путь local относительно mem, [(имя shared, путь)]) из yamem.config.yaml."""
-    cfg = mem / "yamem.config.yaml"
-    local_path, shared = "local", []
-    if cfg.is_file():
-        text = cfg.read_text(encoding="utf-8")
-        m = re.search(r"^local:\s*$.*?^\s*path:\s*(\S+)", text, re.M | re.S)
+def truthy(v) -> bool:
+    return str(v).strip().lower() in ("true", "yes", "да", "1", "+")
+
+
+def _list_items(text: str, key: str):
+    """Элементы YAML-списка `key:` как плоские словари; None — секции нет.
+
+    Хватает `- ключ: значение` и продолжающие строки того же элемента. Значение
+    берётся до первого пробела, поэтому хвостовой комментарий в него не попадает.
+    """
+    block = re.search(rf"^{key}:\s*$(.*?)(?=^\S|\Z)", text, re.M | re.S)
+    if not block:
+        return None
+    items, cur = [], None
+    for line in block.group(1).splitlines():
+        m = re.match(r"^\s*-\s*([A-Za-z_]\w*):\s*(\S+)", line)
         if m:
-            local_path = m.group(1)
-        block = re.search(r"^shared:\s*$(.*?)(?=^\S|\Z)", text, re.M | re.S)
-        if block:
-            for name, path in re.findall(
-                r"-\s*name:\s*(\S+)\s*\n\s*path:\s*(\S+)", block.group(1)
-            ):
-                shared.append((name, path))
-    return local_path, shared
+            cur = {m.group(1): m.group(2)}
+            items.append(cur)
+            continue
+        m = re.match(r"^\s+([A-Za-z_]\w*):\s*(\S+)", line)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2)
+    return items
+
+
+def read_config(mem: Path) -> dict:
+    """{"journal": каталог журнала, "banks": [(имя, каталог, pull_on_start)]}.
+
+    Плоская раскладка: журнал проекта (MEMORY.md, diary/, tasks/, представления)
+    лежит в корне памяти, отчуждаемое знание — в банках из секции `banks:`.
+    Банк со своими топиками зовётся `local` и ничем не выделен среди прочих.
+    """
+    cfg = mem / "yamem.config.yaml"
+    text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+
+    items = _list_items(text, "banks")
+    if items is not None:
+        return {"journal": mem, "banks": [
+            (i.get("name", "?"), mem / i.get("path", ""),
+             truthy(i.get("pull_on_start", "true"))) for i in items
+        ]}
+
+    # ⚠️ Ветка старой раскладки (`local:` + `shared:`) держится только ради окна
+    # переезда на плоскую и снимается, когда памяти в старом виде не остаётся.
+    m = re.search(r"^local:\s*$.*?^\s*path:\s*(\S+)", text, re.M | re.S)
+    journal = mem / (m.group(1) if m else "local")
+    banks = [("local", journal, True)]
+    for i in _list_items(text, "shared") or []:
+        banks.append((i.get("name", "?"), mem / i.get("path", ""),
+                      truthy(i.get("pull_on_start", "true"))))
+    return {"journal": journal, "banks": banks}
 
 
 def read_banks(mem: Path):
-    """[(имя банка, каталог банка, путь к topics/)] — local первым."""
-    local_path, shared = read_config(mem)
-    banks = [("local", mem / local_path)]
-    banks += [(name, mem / path) for name, path in shared]
-    return [(n, d, d / "topics") for n, d in banks if (d / "topics").is_dir()]
+    """[(имя банка, каталог банка, путь к topics/)] — только банки с топиками."""
+    return [(n, d, d / "topics") for n, d, _ in read_config(mem)["banks"]
+            if (d / "topics").is_dir()]
 
 
-def local_root(mem: Path) -> Path:
-    """Каталог локальной памяти проекта."""
-    local_path, _ = read_config(mem)
-    return mem / local_path
+def journal_root(mem: Path) -> Path:
+    """Каталог журнала проекта: MEMORY.md, diary/, tasks/, представления."""
+    return read_config(mem)["journal"]
 
 
 def splice(path: Path, begin: str, end: str, body: str, apply: bool,

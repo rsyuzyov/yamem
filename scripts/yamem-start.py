@@ -10,7 +10,8 @@
 Ключи:
     --days N        сколько дней дневника (по умолчанию из конфига)
     --diary РЕЖИМ   heads | red (по умолчанию) | marks | full — насколько подробно
-    --no-sync       не трогать git (только чтение)
+    --no-sync       не трогать git вовсе: ни pull банков, ни коммит отметки
+                    (режим для прогона на копии памяти)
     --prune         снести записи брошенных сессий (старше 6 часов)
 
 Печатает markdown в stdout. Задачи и дневники не пересказываются целиком:
@@ -24,7 +25,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from yamem_common import local_root, parse_frontmatter, read_config
+from yamem_common import journal_root, parse_frontmatter, read_config, truthy
 
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 SESSION_STALE_HOURS = 6
@@ -45,19 +46,36 @@ def is_git(path: Path) -> bool:
     return (path / ".git").exists()
 
 
+def within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def sync(mem: Path, no_sync: bool, out: list):
-    """git pull --rebase по банкам. Ошибка синхронизации не блокирует старт."""
-    local_path, shared = read_config(mem)
-    banks = [("local", mem / local_path, True)]
-    banks += [(name, mem / path, True) for name, path in shared]
+    """git pull --rebase по репозиториям памяти. Ошибка не блокирует старт."""
+    cfg = read_config(mem)
+    journal = cfg["journal"]
+    targets = [("память", journal)]
+    for name, path, _pull in cfg["banks"]:
+        # в старой раскладке банк со своими топиками — это сам журнал
+        if path.resolve() != journal.resolve():
+            targets.append((name, path))
 
     out.append("## Синхронизация")
-    for name, path, want in banks:
+    inside = []
+    for name, path in targets:
         if not path.is_dir():
             out.append(f"- {name}: ⚠️ нет каталога `{path}`")
             continue
         if not is_git(path):
-            out.append(f"- {name}: обычный каталог, git не настроен")
+            # банк внутри репозитория памяти едет с ним и своего pull не требует
+            if path.resolve() != journal.resolve() and within(path, journal):
+                inside.append(name)
+            else:
+                out.append(f"- {name}: обычный каталог, git не настроен")
             continue
         if no_sync:
             out.append(f"- {name}: пропущено (`--no-sync`)")
@@ -68,10 +86,12 @@ def sync(mem: Path, no_sync: bool, out: list):
             out.append(f"- {name}: synced — {state}")
         else:
             out.append(f"- {name}: ⚠️ NOT synced — {(se or so).splitlines()[0][:100]}")
+    if inside:
+        out.append(f"- {', '.join(inside)}: в составе репозитория памяти")
     out.append("")
 
 
-def sessions(root: Path, sid: str, topic: str, prune: bool, out: list):
+def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: list):
     """Отметиться на доске и показать, кто ещё в работе."""
     board = root / ".sessions"
     board.mkdir(exist_ok=True)
@@ -88,7 +108,10 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, out: list):
         f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\nhosts: —\n",
         encoding="utf-8", newline="\n")
 
-    if is_git(root):
+    # ⚠️ `--no-sync` глушит и запись отметки в git: копия памяти для проверок несёт
+    # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
+    # репозиторий (было 2026-08-16).
+    if is_git(root) and not no_sync:
         rel = f".sessions/{sid}.md"
         code, _, _ = run(["git", "add", rel], cwd=root)
         code, _, _ = run(["git", "diff", "--cached", "--quiet", "--", rel], cwd=root)
@@ -136,10 +159,6 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, out: list):
                        f" — снять `--prune`")
     out.append(f"- своя отметка записана: `{sid}`")
     out.append("")
-
-
-def truthy(v) -> bool:
-    return str(v).strip().lower() in ("true", "yes", "да", "1", "+")
 
 
 def tasks(root: Path, out: list):
@@ -237,9 +256,8 @@ def commits(root: Path, out: list):
 
 
 def banks(mem: Path, out: list):
-    local_path, shared = read_config(mem)
     names, counts, per_bank = {}, [], []
-    for name, path in [("local", mem / local_path)] + [(n, mem / p) for n, p in shared]:
+    for name, path, _pull in read_config(mem)["banks"]:
         tdir = path / "topics"
         if not tdir.is_dir():
             continue
@@ -303,9 +321,9 @@ def main():
     mem = Path(args.memory).resolve()
     if not mem.is_dir():
         sys.exit(f"нет каталога памяти: {mem}")
-    root = local_root(mem)
+    root = journal_root(mem)
     if not root.is_dir():
-        sys.exit(f"нет каталога локальной памяти: {root}")
+        sys.exit(f"нет каталога журнала памяти: {root}")
 
     days = args.days
     if not days:
@@ -317,7 +335,7 @@ def main():
 
     out = [f"# yamem preflight — {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
     sync(mem, args.no_sync, out)
-    sessions(root, args.sid, args.topic, args.prune, out)
+    sessions(root, args.sid, args.topic, args.prune, args.no_sync, out)
     tasks(root, out)
     banks(mem, out)
     commits(root, out)

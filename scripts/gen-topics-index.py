@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Генерация индекса топиков из OKF-фронтматтера.
 
-Собирает `type` и `description` из топиков всех банков (local + shared) и
-подставляет готовый список в размеченные блоки:
+Собирает `type` и `description` из топиков всех банков и подставляет готовый
+список в размеченные блоки:
 
     <!-- yamem:topics-index:begin -->   ...   <!-- yamem:topics-index:end -->
 
 Куда пишет:
-  * `<local>/MEMORY.md`      — раздел «База знаний», все банки;
-  * README каждого банка     — только топики этого банка.
+  * `MEMORY.md` в корне памяти — раздел «База знаний», все банки;
+  * README каждого банка       — только топики этого банка.
 
 Блоки с маркерами должны уже существовать в файле — скрипт не угадывает, куда
 вставлять, и не трогает ничего за их пределами. Запуск без `--apply` — сухой
@@ -20,10 +20,11 @@
 (для проверки перед коммитом).
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
-from yamem_common import parse_frontmatter, read_banks, splice
+from yamem_common import journal_root, parse_frontmatter, read_banks, splice
 
 BEGIN = "<!-- yamem:topics-index:begin -->"
 END = "<!-- yamem:topics-index:end -->"
@@ -100,19 +101,19 @@ def main():
     for name, root, topics in banks:
         rows, warn = collect(topics, root)
         complaints += warn
-        title = "Память проекта" if name == "local" else f"Банк `{name}`"
-        all_groups.append((title, rows, root))
+        all_groups.append((f"Банк `{name}`", rows, root))
 
     # 1) сводный индекс в MEMORY.md — только если там ещё стоят маркеры.
     # По умолчанию индекс живёт в README банков: в MEMORY он весил 23 КБ и грузился
     # каждой сессией, хотя нужен точечно — когда выбираешь, какой топик открыть.
-    local_root = banks[0][1]
-    memory_md = local_root / "MEMORY.md"
+    journal = journal_root(mem)
+    memory_md = journal / "MEMORY.md"
     if memory_md.is_file() and BEGIN in memory_md.read_text(encoding="utf-8"):
         groups = []
         for title, rows, root in all_groups:
-            # ссылки даём относительно каталога local — банки лежат выше по дереву
-            prefix = "" if root == local_root else f"../{root.relative_to(mem).as_posix()}/"
+            # ссылки даём относительно MEMORY.md: банки лежат где угодно от него
+            prefix = os.path.relpath(root, journal).replace(os.sep, "/")
+            prefix = "" if prefix == "." else prefix + "/"
             groups.append((title, [(prefix + rel, t, d) for rel, t, d in rows]))
         if splice(memory_md, BEGIN, END, render(groups, ""), args.apply):
             changed.append(memory_md)

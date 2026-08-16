@@ -15,10 +15,13 @@ set -e
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 
-# Где память. Два случая: коммитим сам репозиторий памяти (в корне MEMORY.md,
-# конфиг лежит уровнем выше) либо проект, внутри которого память обычным каталогом.
+# Где память. Три случая: репозиторий памяти целиком (конфиг и MEMORY.md в корне),
+# старая раскладка (репозиторий = каталог local, конфиг уровнем выше) либо проект,
+# внутри которого память лежит обычным каталогом.
 mem=""
-if [ -f "$root/MEMORY.md" ] && [ -f "$root/../yamem.config.yaml" ]; then
+if [ -f "$root/yamem.config.yaml" ] && [ -f "$root/MEMORY.md" ]; then
+    mem="$root"
+elif [ -f "$root/MEMORY.md" ] && [ -f "$root/../yamem.config.yaml" ]; then
     mem=$(cd "$root/.." && pwd)
 elif [ -f "$root/.agents/memory/yamem.config.yaml" ] &&
      git diff --cached --name-only | grep -q '^\.agents/memory/'; then

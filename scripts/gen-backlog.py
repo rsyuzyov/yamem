@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-from yamem_common import local_root, md_cell, parse_frontmatter, splice
+from yamem_common import journal_root, md_cell, parse_frontmatter, splice
 
 BACKLOG_BEGIN = "<!-- yamem:backlog:begin -->"
 BACKLOG_END = "<!-- yamem:backlog:end -->"
@@ -228,9 +228,9 @@ def main():
     mem = Path(args.memory).resolve()
     if not mem.is_dir():
         sys.exit(f"нет каталога памяти: {mem}")
-    root = local_root(mem)
+    root = journal_root(mem)
     if not root.is_dir():
-        sys.exit(f"нет каталога локальной памяти: {root}")
+        sys.exit(f"нет каталога журнала памяти: {root}")
 
     rows, complaints = collect(root / "tasks")
     changed, legacy = [], []

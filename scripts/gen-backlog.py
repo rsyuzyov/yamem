@@ -31,6 +31,7 @@ GENERATED_NOTE = "<!-- сгенерировано scripts/gen-backlog.py — р�
 STATUSES = ("new", "in-progress", "waiting", "done")
 REQUIRED = ("title", "created", "updated", "status")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 BACKLOG_SKELETON = f"""# Бэклог
 
@@ -58,10 +59,46 @@ def truthy(value: str) -> bool:
 
 
 def collect(tasks_dir: Path):
-    """[(slug, поля)] + список жалоб. Задача = папка с task.md внутри."""
+    """[(путь от tasks/, поля)] + жалобы. Задача = папка с task.md в каталоге месяца."""
     rows, complaints = [], []
     if not tasks_dir.is_dir():
         return rows, complaints  # памяти без задач ещё нет — это не дефект
+
+    def take(folder: Path, rel: str, month: str):
+        task_md = folder / "task.md"
+        if not task_md.is_file():
+            complaints.append(f"tasks/{rel}/: нет task.md")
+            return
+        fm = parse_frontmatter(task_md)
+        if not fm:
+            complaints.append(f"tasks/{rel}/task.md: нет фронтматтера")
+            return
+
+        missing = [k for k in REQUIRED if not fm.get(k)]
+        if missing:
+            complaints.append(
+                f"tasks/{rel}/task.md: нет обязательных полей: {', '.join(missing)}"
+            )
+        if fm.get("status") and fm["status"] not in STATUSES:
+            complaints.append(
+                f"tasks/{rel}/task.md: status `{fm['status']}` вне набора {'/'.join(STATUSES)}"
+            )
+        for key in ("created", "updated"):
+            if fm.get(key) and not DATE_RE.match(fm[key]):
+                complaints.append(
+                    f"tasks/{rel}/task.md: {key} `{fm[key]}` не в формате YYYY-MM-DD"
+                )
+        created, updated = fm.get("created", ""), fm.get("updated", "")
+        if DATE_RE.match(created) and DATE_RE.match(updated) and updated < created:
+            complaints.append(
+                f"tasks/{rel}/task.md: updated {updated} раньше created {created}"
+            )
+        # каталог назван месяцем заведения — иначе путь задачи врёт
+        if month and DATE_RE.match(created) and created[:7] != month:
+            complaints.append(
+                f"tasks/{rel}/task.md: лежит в каталоге {month}, а created {created}"
+            )
+        rows.append((rel, fm))
 
     for entry in sorted(tasks_dir.iterdir()):
         if entry.name.startswith("."):
@@ -73,38 +110,12 @@ def collect(tasks_dir: Path):
                     f"задача должна быть папкой с task.md"
                 )
             continue
-
-        task_md = entry / "task.md"
-        if not task_md.is_file():
-            complaints.append(f"tasks/{entry.name}/: нет task.md")
+        if MONTH_RE.match(entry.name):
+            for folder in sorted(entry.iterdir()):
+                if folder.is_dir() and not folder.name.startswith("."):
+                    take(folder, f"{entry.name}/{folder.name}", entry.name)
             continue
-
-        fm = parse_frontmatter(task_md)
-        if not fm:
-            complaints.append(f"tasks/{entry.name}/task.md: нет фронтматтера")
-            continue
-
-        missing = [k for k in REQUIRED if not fm.get(k)]
-        if missing:
-            complaints.append(
-                f"tasks/{entry.name}/task.md: нет обязательных полей: {', '.join(missing)}"
-            )
-        if fm.get("status") and fm["status"] not in STATUSES:
-            complaints.append(
-                f"tasks/{entry.name}/task.md: status `{fm['status']}` "
-                f"вне набора {'/'.join(STATUSES)}"
-            )
-        for key in ("created", "updated"):
-            if fm.get(key) and not DATE_RE.match(fm[key]):
-                complaints.append(
-                    f"tasks/{entry.name}/task.md: {key} `{fm[key]}` не в формате YYYY-MM-DD"
-                )
-        created, updated = fm.get("created", ""), fm.get("updated", "")
-        if DATE_RE.match(created) and DATE_RE.match(updated) and updated < created:
-            complaints.append(
-                f"tasks/{entry.name}/task.md: updated {updated} раньше created {created}"
-            )
-        rows.append((entry.name, fm))
+        take(entry, entry.name, "")  # задача в корне tasks/ — старая раскладка
     return rows, complaints
 
 
@@ -131,12 +142,14 @@ def link(slug, fm) -> str:
 
 BACKLOG_COLUMNS = [
     ("задача", link),
+    ("направление", lambda s, fm: md_cell(fm.get("area", "")) or "—"),
     ("клиент", lambda s, fm: md_cell(fm.get("client", "")) or "—"),
     ("обновлена", lambda s, fm: fm.get("updated", "—")),
 ]
 
 ARCHIVE_COLUMNS = [
     ("задача", link),
+    ("направление", lambda s, fm: md_cell(fm.get("area", "")) or "—"),
     ("клиент", lambda s, fm: md_cell(fm.get("client", "")) or "—"),
     ("заведена", lambda s, fm: fm.get("created", "—")),
     ("закрыта", lambda s, fm: fm.get("updated", "—")),

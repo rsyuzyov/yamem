@@ -46,6 +46,27 @@ def is_git(path: Path) -> bool:
     return (path / ".git").exists()
 
 
+def attach(path: Path, out: list, name: str) -> None:
+    """Банк-субмодуль клонируется на detached HEAD, и `pull` в нём не проходит.
+
+    Привязываем к ветке по origin/HEAD — но только если текущий коммит её предок,
+    иначе тут лежит несохранённая работа и трогать её нельзя.
+    """
+    code, _, _ = run(["git", "symbolic-ref", "-q", "HEAD"], cwd=path)
+    if code == 0:
+        return
+    code, branch, _ = run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=path)
+    if code != 0 or "/" not in branch:
+        return
+    branch = branch.split("/", 1)[1]
+    code, _, _ = run(["git", "merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"], cwd=path)
+    if code != 0:
+        out.append(f"- ⚠️ {name}: detached HEAD с своими коммитами — разобрать руками")
+        return
+    if run(["git", "checkout", "-q", branch], cwd=path)[0] == 0:
+        out.append(f"- {name}: подхвачен с detached HEAD на `{branch}`")
+
+
 def within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -80,6 +101,7 @@ def sync(mem: Path, no_sync: bool, out: list):
         if no_sync:
             out.append(f"- {name}: пропущено (`--no-sync`)")
             continue
+        attach(path, out, name)
         code, so, se = run(["git", "pull", "--rebase", "--autostash"], cwd=path)
         if code == 0:
             state = "уже актуально" if "up to date" in so.lower() else so.splitlines()[-1][:80]

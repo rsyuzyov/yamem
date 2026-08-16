@@ -103,16 +103,19 @@ def main():
         title = "Память проекта" if name == "local" else f"Банк `{name}`"
         all_groups.append((title, rows, root))
 
-    # 1) сводный индекс в MEMORY.md — пути относительно каталога local
+    # 1) сводный индекс в MEMORY.md — только если там ещё стоят маркеры.
+    # По умолчанию индекс живёт в README банков: в MEMORY он весил 23 КБ и грузился
+    # каждой сессией, хотя нужен точечно — когда выбираешь, какой топик открыть.
     local_root = banks[0][1]
     memory_md = local_root / "MEMORY.md"
-    groups = []
-    for title, rows, root in all_groups:
-        # ссылки даём относительно каталога local — банки лежат выше по дереву
-        prefix = "" if root == local_root else f"../{root.relative_to(mem).as_posix()}/"
-        groups.append((title, [(prefix + rel, t, d) for rel, t, d in rows]))
-    if splice(memory_md, BEGIN, END, render(groups, ""), args.apply):
-        changed.append(memory_md)
+    if memory_md.is_file() and BEGIN in memory_md.read_text(encoding="utf-8"):
+        groups = []
+        for title, rows, root in all_groups:
+            # ссылки даём относительно каталога local — банки лежат выше по дереву
+            prefix = "" if root == local_root else f"../{root.relative_to(mem).as_posix()}/"
+            groups.append((title, [(prefix + rel, t, d) for rel, t, d in rows]))
+        if splice(memory_md, BEGIN, END, render(groups, ""), args.apply):
+            changed.append(memory_md)
 
     # 2) свой список в README каждого банка
     for title, rows, root in all_groups:

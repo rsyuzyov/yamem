@@ -238,21 +238,26 @@ def commits(root: Path, out: list):
 
 def banks(mem: Path, out: list):
     local_path, shared = read_config(mem)
-    names, counts = {}, []
+    names, counts, per_bank = {}, [], []
     for name, path in [("local", mem / local_path)] + [(n, mem / p) for n, p in shared]:
         tdir = path / "topics"
         if not tdir.is_dir():
             continue
         files = sorted(f.stem for f in tdir.glob("*.md") if f.name != "README.md")
         counts.append(f"{name}: {len(files)}")
+        per_bank.append((name, files))
         for f in files:
             names.setdefault(f, []).append(name)
     dup = sorted(n for n, banks_ in names.items() if len(banks_) > 1)
     out.append("## Банки топиков")
     out.append("- " + " · ".join(counts))
+    for bank, files in per_bank:
+        out.append(f"- **{bank}**: {', '.join(files)}")
     if dup:
         out.append(f"- ⚠️ одноимённые (читать **вместе**, это «универсальное + дельта»): "
                    f"{', '.join(dup)}")
+    out.append("- когда по имени не ясно, идти ли в топик, — `description` каждого лежит "
+               "в `README.md` его банка")
     out.append("")
 
 

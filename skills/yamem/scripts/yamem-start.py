@@ -221,6 +221,104 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: 
     out.append("")
 
 
+# 🎯 «Горит» определяется НЕ статусом, а сроком, и срок лежит в теле задачи:
+# `urgent: false` спокойно стоит у задачи с истёкшей лицензией. Дайджест поэтому
+# вытаскивает даты из тел — иначе агент идёт грепать их сам, а это лишние раунды.
+# ⚠️ Маркеры узкие намеренно. Широкое «срок» ловило даты ПОСТАНОВКИ задач
+# («вопрос оператора 09.08», «политика от 2026-08-02») и печатало их как
+# ПРОСРОЧЕННЫЕ — ложная тревога дороже пропуска: она заставляет идти проверять.
+DEADLINE_HINT = re.compile(
+    r"(?i)(истека\w*|истёк\w*|истек\w*|не позднее|дедлайн|deadline|expires?|"
+    r"срок до|годн\w+ до|действует до|продлить до|перевыпуст\w+ до)")
+# насколько близко к маркеру должна стоять дата, чтобы считаться сроком
+DEADLINE_NEAR = 60
+ISO_DATE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+DMY_DATE = re.compile(r"\b(\d{1,2})[.\-](\d{1,2})(?:[.\-](\d{2,4}))?\b")
+
+
+def dates_in(line: str, today):
+    """[(дата, позиция в строке)]. Без года — ближайшая трактовка: год текущий,
+    а если это уводит больше чем на месяц в прошлое, значит речь о следующем."""
+    found = []
+    for m in ISO_DATE.finditer(line):
+        try:
+            found.append((datetime(int(m.group(1)), int(m.group(2)),
+                                   int(m.group(3))).date(), m.start()))
+        except ValueError:
+            pass
+    for m in DMY_DATE.finditer(line):
+        day, month, year = m.group(1), m.group(2), m.group(3)
+        try:
+            if year:
+                y = int(year) + (2000 if len(year) == 2 else 0)
+                found.append((datetime(y, int(month), int(day)).date(), m.start()))
+            else:
+                d = datetime(today.year, int(month), int(day)).date()
+                if (today - d).days > 31:
+                    d = datetime(today.year + 1, int(month), int(day)).date()
+                found.append((d, m.start()))
+        except ValueError:
+            pass
+    return found
+
+
+def deadline_of(path: Path, today, title: str = ""):
+    """Ближайший срок задачи: (дата, контекст) либо None.
+
+    Ищем в заголовке и в теле. Дата считается сроком, только если стоит рядом
+    с маркером срока (`DEADLINE_NEAR` символов) — иначе это дата постановки,
+    прецедента или решения, и её нельзя показывать как дедлайн.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [title] + text.split("\n---\n", 1)[-1].split("\n")
+    best = None
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        hints = [(m.start(), m.end()) for m in DEADLINE_HINT.finditer(s)]
+        if not hints:
+            continue
+        for d, pos in dates_in(s, today):
+            if not any(min(abs(pos - h_end), abs(pos - h_start)) <= DEADLINE_NEAR
+                       for h_start, h_end in hints):
+                continue
+            if best is None or d < best[0]:
+                # контекст — окно вокруг самой даты, а не начало строки
+                lo, hi = max(0, pos - 70), min(len(s), pos + 70)
+                best = (d, ("…" if lo else "") + s[lo:hi] + ("…" if hi < len(s) else ""))
+    return best
+
+
+def deadlines_block(rows: list, root: Path, out: list, horizon: int = 45, limit: int = 12):
+    """Задачи со сроком: просроченные и ближайшие. Строкой, с датой и контекстом."""
+    today = datetime.now().date()
+    found = []
+    for rel, _fm, title in rows:
+        d = deadline_of(root / "tasks" / rel / "task.md", today, title)
+        if d and (d[0] - today).days <= horizon:
+            found.append((d[0], rel, title, d[1]))
+    if not found:
+        return
+    found.sort()
+    out.append(f"**⏰ Со сроком в теле задачи** ({len(found)})")
+    for date, rel, title, ctx in found[:limit]:
+        left = (date - today).days
+        mark = "🔴 ПРОСРОЧЕН" if left < 0 else ("🟠" if left <= 7 else "🟡")
+        when = f"{-left} дн. назад" if left < 0 else (f"через {left} дн." if left else "сегодня")
+        out.append(f"- {mark} {date:%d.%m} ({when}) — {title} — `tasks/{rel}/`")
+        # контекст не печатаем, если срок и так виден в заголовке
+        plain = ctx.strip("…").strip()
+        if plain[:60] not in title:
+            out.append(f"  ↳ {plain[:150]}")
+    if len(found) > limit:
+        out.append(f"- … ещё {len(found) - limit} со сроком в пределах {horizon} дн.")
+    out.append("")
+
+
 def tasks(root: Path, out: list, working_limit=None):
     """Горячее — строкой, остальное — счётчиками. Тела задач не читаем.
 
@@ -268,6 +366,7 @@ def tasks(root: Path, out: list, working_limit=None):
         out.append("")
 
     block("🔥 Срочно и важно", hot)
+    deadlines_block([(rel, fm, fm.get("title", rel)) for rel, fm in openable], root, out)
     block("⏸ Ожидает внешнего действия", waiting)
     block("🔧 В работе", working, limit=working_limit)
     block("⚡ Срочно, не важно", urgent_only, limit=5)

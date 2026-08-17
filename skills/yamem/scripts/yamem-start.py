@@ -12,7 +12,8 @@
     --diary РЕЖИМ   heads | red (по умолчанию) | marks | full — насколько подробно
     --no-sync       не трогать git вовсе: ни pull банков, ни коммит отметки
                     (режим для прогона на копии памяти)
-    --prune         снести записи брошенных сессий (старше 6 часов)
+    --prune         снести записи неактивных сессий сразу (порог 6 ч вместо 26);
+                    брошенное старше 26 ч часть 1 снимает и без этого ключа
     --part K        печатать часть дайджеста: 1 = ядро (синхронизация, соседи,
                     задачи, банки, коммиты), 2..N = куски сводок дневников.
                     Без ключа печатается всё одним выводом.
@@ -40,7 +41,17 @@ from pathlib import Path
 from yamem_common import journal_root, parse_frontmatter, read_config, truthy
 
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
-SESSION_STALE_HOURS = 6
+SESSION_STALE_HOURS = 6      # позже этого сессия не считается активной
+# 🔑 Два порога вместо одного. Отметка пишется при старте и смене темы, поэтому
+# «6 часов молчания» ещё не значит «сессия ушла»: сессия, работающая восьмой час,
+# при одном пороге молча исчезла бы с доски у соседей. Снимаем только с 26 ч —
+# и это заведомо больше окна показа (24 ч), чтобы снятая запись не выпадала
+# из списка «какие темы сегодня уже брали».
+SESSION_DROP_HOURS = 26      # позже этого запись снимается с доски автоматически
+SESSION_SHOW_HOURS = 24      # окно списка тем за сутки
+SESSION_SHOW_MAX = 15
+# связь «коммит памяти → сессия»: дневник называется diary/<месяц>/<дата>.<sid>.md
+DIARY_SID = re.compile(r"diary/[^/]+/\d{4}-\d{2}-\d{2}\.([0-9a-f]{6,12})\.md$")
 # сколько байт харнес пропускает в выводе инструмента, дальше подменяет превью;
 # `--part-limit` держим ниже с запасом, а по этому порогу только предупреждаем
 HARNESS_LIMIT = 28000
@@ -144,8 +155,56 @@ def sync(mem: Path, no_sync: bool, out: list):
     out.append("")
 
 
-def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: list):
-    """Отметиться на доске и показать, кто ещё в работе."""
+def recent_commits(root: Path, hours: int = 24) -> list:
+    """Коммиты памяти за окно, с привязкой к сессии по файлу дневника.
+
+    🔑 Связь «коммит → сессия» в памяти уже есть: дневник называется
+    `diary/<месяц>/<дата>.<sid>.md`. Поэтому «что сосед успел сделать» не требует
+    ни нового поля в отметке, ни дисциплины его заполнять — только группировки
+    того, что и так печаталось плоским списком (40 % ядра дайджеста на 17.08).
+    """
+    code, so, _ = run(["git", "log", f"--since={hours} hours ago",
+                       "--format=%x1e%h%x1f%aI%x1f%s", "--name-only"], cwd=root)
+    items = []
+    if code != 0 or not so:
+        return items
+    for rec in so.split("\x1e"):
+        rec = rec.strip("\n")
+        if not rec:
+            continue
+        head, _, rest = rec.partition("\n")
+        parts = head.split("\x1f")
+        if len(parts) < 3:
+            continue
+        when = None
+        try:
+            when = datetime.fromisoformat(parts[1]).replace(tzinfo=None)
+        except ValueError:
+            pass
+        files = [f for f in rest.split("\n") if f.strip()]
+        sids = {m.group(1) for f in files for m in [DIARY_SID.search(f)] if m}
+        items.append({"h": parts[0], "when": when, "subject": parts[2],
+                      "files": files, "sids": sids,
+                      "board": parts[2].startswith("sessions:")})
+    return items
+
+
+def ago(now, when) -> str:
+    mins = max(0, int((now - when).total_seconds() // 60))
+    if mins < 90:
+        return f"{mins} мин"
+    if mins < 24 * 60:
+        return f"{mins / 60:.1f} ч"
+    return f"{mins / 1440:.1f} дн"
+
+
+def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
+             out: list, log: list) -> set:
+    """Отметиться на доске, показать соседей С РЕЗУЛЬТАТОМ и снять брошенное.
+
+    Возвращает sid'ы, чьи коммиты уже показаны здесь, — чтобы блок коммитов
+    не печатал их второй раз.
+    """
     board = root / ".sessions"
     board.mkdir(exist_ok=True)
     now = datetime.now()
@@ -161,28 +220,16 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: 
         f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\nhosts: —\n",
         encoding="utf-8", newline="\n")
 
-    # ⚠️ `--no-sync` глушит и запись отметки в git: копия памяти для проверок несёт
-    # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
-    # репозиторий (было 2026-08-16).
-    if is_git(root) and not no_sync:
-        t0 = time.monotonic()
-        rel = f".sessions/{sid}.md"
-        code, _, _ = run(["git", "add", rel], cwd=root)
-        code, _, _ = run(["git", "diff", "--cached", "--quiet", "--", rel], cwd=root)
-        if code == 1:  # есть что коммитить
-            run(["git", "commit", "-q", "-m", f"sessions: {sid} в работе", "--", rel], cwd=root)
-            # ⏱ push отметки — 5 с сетевого ожидания, которых старт не должен ждать:
-            # соседи читают доску не в эту же секунду, а нам она уже записана локально.
-            # Отпускаем в фон; провалившийся push всплывёт при следующем pull.
-            try:
-                subprocess.Popen(["git", "push", "-q"], cwd=root,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                out.append("- отметка закоммичена, push ушёл в фоне")
-            except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
-                out.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
-            TIMING["mark"] = time.monotonic() - t0
+    notes = []  # служебные строки печатаются в конце блока, а не между блоками
+    # результат сессии = её коммиты в память; служебные отметки в счёт не идут
+    by_sid = {}
+    for c in log:
+        if c["board"]:
+            continue
+        for s in c["sids"]:
+            by_sid.setdefault(s, []).append(c)
 
-    live, stale = [], []
+    rows, removed = [], []
     for f in sorted(board.glob("*.md")):
         if f.stem == sid:
             continue
@@ -195,30 +242,97 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: 
             except ValueError:
                 upd = None
         t = re.search(r"^topic:\s*(.+)$", text, re.M)
-        line = (f.stem, upd, (t.group(1).strip() if t else "—"))
-        if upd and now - upd < timedelta(hours=SESSION_STALE_HOURS):
-            live.append(line)
-        else:
-            stale.append(line)
+        acts = sorted(by_sid.get(f.stem, []), key=lambda c: c["when"] or now)
+        # 🔑 Живость — по ФАКТУ работы, а не только по полю `updated`: коммит
+        # с дневником сессии моложе её отметки, а дисциплины он не требует.
+        seen = [d for d in [upd] + [c["when"] for c in acts] if d]
+        last = max(seen) if seen else datetime.fromtimestamp(f.stat().st_mtime)
+        rows.append({"sid": f.stem, "topic": (t.group(1).strip() if t else "—"),
+                     "upd": upd or last, "last": last, "acts": acts, "file": f})
 
-    out.append("## Соседние сессии")
+    # sid, у которого работа в памяти есть, а запись уже снята (руками или нами
+    # вчера): результат показать надо, иначе он молча исчезнет из дайджеста
+    on_board = {r["sid"] for r in rows} | {sid}
+    for s, acts in sorted(by_sid.items()):
+        if s in on_board:
+            continue
+        acts = sorted(acts, key=lambda c: c["when"] or now)
+        last = max([c["when"] for c in acts if c["when"]], default=now)
+        rows.append({"sid": s, "topic": "— (отметка снята)", "upd": last,
+                     "last": last, "acts": acts, "file": None})
+
+    rows.sort(key=lambda r: r["last"], reverse=True)
+    drop_after = timedelta(hours=SESSION_STALE_HOURS if prune else SESSION_DROP_HOURS)
+    for r in rows:
+        # ⚠️ Свежий коммит НЕ делает сессию активной, если её запись уже снята:
+        # снятая отметка — это «сессия закрыта», и звать её соседом нельзя.
+        r["live"] = bool(r["file"]) and now - r["last"] < timedelta(hours=SESSION_STALE_HOURS)
+        if r["file"] and not r["live"] and now - r["last"] >= drop_after:
+            removed.append(r["sid"])
+
+    # ⚠️ `--no-sync` глушит и запись отметки в git: копия памяти для проверок несёт
+    # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
+    # репозиторий (было 2026-08-16). По той же причине на копии ничего не сносим.
+    if is_git(root) and not no_sync:
+        t0 = time.monotonic()
+        paths = [f".sessions/{sid}.md"]
+        for name in removed:
+            (board / f"{name}.md").unlink(missing_ok=True)
+            paths.append(f".sessions/{name}.md")
+        run(["git", "add", "--"] + paths, cwd=root)
+        code, _, _ = run(["git", "diff", "--cached", "--quiet", "--"] + paths, cwd=root)
+        if code == 1:  # есть что коммитить
+            msg = f"sessions: {sid} в работе"
+            if removed:
+                msg += f"; снято брошенных: {len(removed)}"
+            run(["git", "commit", "-q", "-m", msg, "--"] + paths, cwd=root)
+            # ⏱ push отметки — 5 с сетевого ожидания, которых старт не должен ждать:
+            # соседи читают доску не в эту же секунду, а нам она уже записана локально.
+            # Отпускаем в фон; провалившийся push всплывёт при следующем pull.
+            try:
+                subprocess.Popen(["git", "push", "-q"], cwd=root,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                notes.append("- отметка закоммичена, push ушёл в фоне")
+            except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
+                notes.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
+            TIMING["mark"] = time.monotonic() - t0
+    elif removed:  # git выключен — файлы не трогаем, но молчать об этом нельзя
+        notes.append(f"- к снятию брошенных: {len(removed)} — не сняты, git выключен "
+                     f"(`--no-sync`)")
+        removed = []
+
+    live = [r for r in rows if r["live"]]
+    past = [r for r in rows
+            if not r["live"] and now - r["last"] < timedelta(hours=SESSION_SHOW_HOURS)]
+    out.append(f"## Сессии за сутки ({len(rows)} · активны {len(live)})")
+    for r in live:
+        out.append(f"- 🔵 **{r['sid']}** · {ago(now, r['last'])} · {r['topic'][:120]}")
+        for c in reversed(r["acts"][-2:]):
+            out.append(f"  ↳ {c['subject'][:100]}")
+        if not r["acts"]:
+            out.append("  ↳ ⚠️ в памяти пока ничего не оставила")
     if live:
-        for name, upd, t in live:
-            ago = int((now - upd).total_seconds() // 60)
-            out.append(f"- 🔵 **{name}** (обновлена {ago} мин назад) — {t[:160]}")
         out.append("⚠️ Не бери задачи, которые уже ведёт соседняя сессия.")
     else:
         out.append("- активных нет")
-    if stale:
-        if prune:
-            for name, _, _ in stale:
-                (board / f"{name}.md").unlink(missing_ok=True)
-            out.append(f"- снято брошенных записей: {len(stale)}")
-        else:
-            out.append(f"- брошенных записей (старше {SESSION_STALE_HOURS} ч): {len(stale)}"
-                       f" — снять `--prune`")
+    for r in past[:SESSION_SHOW_MAX]:
+        mark = "⚫" if r["file"] is None or r["sid"] in removed else "⚪"
+        tail = (f" ↳ {r['acts'][-1]['subject'][:70]}" if r["acts"]
+                else " ⚠️ **без следа**")
+        out.append(f"- {mark} {r['sid']} · {r['upd'].strftime('%H:%M')} · "
+                   f"{r['topic'][:70]} —{tail}")
+    if len(past) > SESSION_SHOW_MAX:
+        out.append(f"- …ещё {len(past) - SESSION_SHOW_MAX} сессий за сутки")
+    if past:
+        out.append("🔁 Темы выше сегодня УЖЕ брали; «без следа» = следа в памяти нет, "
+                   "а не «не сделано».")
+    if removed:
+        out.append(f"- снято брошенных записей (старше "
+                   f"{int(drop_after.total_seconds() // 3600)} ч): {len(removed)}")
+    out += notes
     out.append(f"- своя отметка записана: `{sid}`")
     out.append("")
+    return {r["sid"] for r in rows} | {sid}
 
 
 # 🎯 «Горит» определяется НЕ статусом, а сроком, и срок лежит в теле задачи:
@@ -474,11 +588,24 @@ def split_entries(entries: list, limit: int) -> list:
     return chunks
 
 
-def commits(root: Path, out: list):
-    code, so, _ = run(["git", "log", "--since=24 hours ago", "--format=%h %ad %s",
-                       "--date=format:%m-%d %H:%M"], cwd=root)
-    out.append("## Коммиты памяти за сутки")
-    out.append(so if code == 0 and so else "- нет")
+COMMITS_MAX = 25
+
+
+def commits(root: Path, out: list, log: list, shown: set):
+    """Остаток коммитов: то, что не легло ни под одну сессию.
+
+    ⚠️ Служебные `sessions: … в работе` отсюда убраны совсем — на 17.08 это была
+    треть блока (27 строк из 80), а доска печатается выше и полнее.
+    """
+    rest = [c for c in log if not c["board"] and not (c["sids"] & shown)]
+    out.append("## Прочие коммиты памяти за сутки (вне сессий выше)")
+    if not rest:
+        out.append("- нет")
+    for c in rest[:COMMITS_MAX]:
+        when = c["when"].strftime("%m-%d %H:%M") if c["when"] else "—"
+        out.append(f"{c['h']} {when} {c['subject']}")
+    if len(rest) > COMMITS_MAX:
+        out.append(f"- …ещё {len(rest) - COMMITS_MAX} — `git log --since='24 hours ago'`")
     out.append("")
 
 
@@ -607,7 +734,8 @@ def main():
     head = [f"# yamem preflight — {stamp}"
             + (f" — часть 1/{total}" if args.part else ""), ""]
     sync(mem, args.no_sync, head)
-    sessions(root, args.sid, args.topic, args.prune, args.no_sync, head)
+    log = recent_commits(root)
+    shown = sessions(root, args.sid, args.topic, args.prune, args.no_sync, head, log)
 
     # 🔑 Ядро — единственная часть, которую нельзя нарезать: она растёт вместе
     # со списком задач в работе (42 строки на 17.08) и однажды упрётся в потолок
@@ -617,7 +745,7 @@ def main():
         trial = list(head)
         tasks(root, trial, working_limit=cand)
         banks(mem, trial)
-        commits(root, trial)
+        commits(root, trial, log, shown)
         out, limit_used = trial, cand
         if not args.part or size("\n".join(trial)) + 600 <= HARNESS_LIMIT:
             break

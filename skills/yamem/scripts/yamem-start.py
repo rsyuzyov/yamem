@@ -16,7 +16,7 @@
     --part K        печатать часть дайджеста: 1 = ядро (синхронизация, соседи,
                     задачи, банки, коммиты), 2..N = куски сводок дневников.
                     Без ключа печатается всё одним выводом.
-    --part-limit N  потолок части в символах (по умолчанию 25000)
+    --part-limit N  потолок части в БАЙТАХ utf-8 (по умолчанию 20000)
 
 Печатает markdown в stdout. Задачи и дневники не пересказываются целиком:
 источник правды — сами файлы, стартер лишь показывает, куда смотреть.
@@ -32,6 +32,7 @@ import io
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def sync(mem: Path, no_sync: bool, out: list):
             targets.append((name, path))
 
     out.append("## Синхронизация")
-    inside = []
+    inside, pullable = [], []
     for name, path in targets:
         if not path.is_dir():
             out.append(f"- {name}: ⚠️ нет каталога `{path}`")
@@ -111,13 +112,24 @@ def sync(mem: Path, no_sync: bool, out: list):
         if no_sync:
             out.append(f"- {name}: пропущено (`--no-sync`)")
             continue
-        attach(path, out, name)
-        code, so, se = run(["git", "pull", "--rebase", "--autostash"], cwd=path)
-        if code == 0:
-            state = "уже актуально" if "up to date" in so.lower() else so.splitlines()[-1][:80]
-            out.append(f"- {name}: synced — {state}")
-        else:
-            out.append(f"- {name}: ⚠️ NOT synced — {(se or so).splitlines()[0][:100]}")
+        attach(path, out, name)  # локально и быстро, до параллельной части
+        pullable.append((name, path))
+
+    # 🔑 Тянем ВСЕ репозитории разом. Последовательные `git pull` — это чистая
+    # сеть, и они складываются: три банка давали ~18 с из 18.5 с всего старта,
+    # причём каждый возвращал «уже актуально». Параллельно — по самому долгому.
+    if pullable:
+        with ThreadPoolExecutor(max_workers=len(pullable)) as pool:
+            futures = {name: pool.submit(run, ["git", "pull", "--rebase", "--autostash"], path)
+                       for name, path in pullable}
+            for name, _ in pullable:
+                code, so, se = futures[name].result()
+                if code == 0:
+                    state = ("уже актуально" if "up to date" in so.lower()
+                             else so.splitlines()[-1][:80])
+                    out.append(f"- {name}: synced — {state}")
+                else:
+                    out.append(f"- {name}: ⚠️ NOT synced — {(se or so).splitlines()[0][:100]}")
     if inside:
         out.append(f"- {', '.join(inside)}: в составе репозитория памяти")
     out.append("")
@@ -275,20 +287,41 @@ def diary_entries(root: Path, days: int, mode: str) -> list:
     return entries
 
 
-def split_entries(entries: list, limit: int) -> list:
-    """Разложить записи по кускам не длиннее `limit` символов.
+def size(text: str) -> int:
+    """Вес куска так, как его считает харнес — в БАЙТАХ UTF-8.
 
-    Жадно и детерминированно: одни и те же записи всегда лягут одинаково,
-    поэтому части можно запрашивать независимыми параллельными вызовами.
-    Запись длиннее лимита едет отдельным куском — резать её нельзя.
+    ⚠️🔴 Не в символах: кириллица даёт ×1.59 байта на символ, и часть, честно
+    уложенная в 23 000 «символов», весит 36 КБ и не проходит лимит вывода
+    инструмента. Ровно на этом первая версия `--part` и провалилась (18.08).
     """
+    return len(text.encode("utf-8"))
+
+
+def split_entries(entries: list, limit: int) -> list:
+    """Разложить записи по кускам не тяжелее `limit` байт.
+
+    Детерминированно: одни и те же записи всегда лягут одинаково, поэтому части
+    можно запрашивать независимыми параллельными вызовами. Запись тяжелее лимита
+    едет отдельным куском — резать её нельзя.
+
+    Куски выравниваются по весу: сначала считаем, сколько частей вообще нужно,
+    и набиваем до `общий вес / число частей`, а не до потолка. Иначе жадная
+    набивка даёт перекос вроде 33 записей в одной части и 4 в следующей.
+    """
+    total = sum(size(t) for _, t in entries)
+    if not entries:
+        return []
+    parts = max(1, -(-total // limit))  # ceil
+    target = max(1, -(-total // parts))
+
     chunks, cur, cur_len = [], [], 0
     for name, text in entries:
-        if cur and cur_len + len(text) > limit:
+        w = size(text)
+        if cur and (cur_len + w > limit or cur_len >= target):
             chunks.append(cur)
             cur, cur_len = [], 0
         cur.append((name, text))
-        cur_len += len(text)
+        cur_len += w
     if cur:
         chunks.append(cur)
     return chunks
@@ -362,8 +395,8 @@ def main():
     ap.add_argument("--prune", action="store_true", help="снести брошенные записи сессий")
     ap.add_argument("--part", type=int, default=0,
                     help="1 = ядро дайджеста, 2..N = куски дневников, 0 = всё одним выводом")
-    ap.add_argument("--part-limit", type=int, default=25000,
-                    help="потолок части в символах (лимит вывода инструмента ~30К)")
+    ap.add_argument("--part-limit", type=int, default=20000,
+                    help="потолок части в БАЙТАХ utf-8 (лимит вывода инструмента ~30 КБ)")
     args = ap.parse_args()
 
     if hasattr(sys.stdout, "reconfigure"):  # эмодзи в выводе на Windows
@@ -435,6 +468,12 @@ def main():
         out.append("")
     maintenance(root, mem, out)
     if args.part:
+        # ядро не режется на части: если оно само переросло лимит — сказать об этом
+        # вслух, иначе харнес молча подменит вывод превью (как было с частью 2 18.08)
+        core = size("\n".join(out))
+        if core > args.part_limit:
+            out.append(f"⚠️ ядро дайджеста {core} Б > лимита {args.part_limit} Б — "
+                       f"вывод могло обрезать; сократить задачи в работе или коммиты за сутки")
         out.append(f"— конец части 1/{total} —")
     print("\n".join(out))
 

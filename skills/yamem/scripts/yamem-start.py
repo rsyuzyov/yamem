@@ -32,6 +32,7 @@ import io
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,9 @@ SESSION_STALE_HOURS = 6
 # сколько байт харнес пропускает в выводе инструмента, дальше подменяет превью;
 # `--part-limit` держим ниже с запасом, а по этому порогу только предупреждаем
 HARNESS_LIMIT = 28000
+# ⏱ время меряет сам стартер: из сессии длительность вызова не видна вовсе,
+# и каждый замер иначе приходится делать руками секундомером
+TIMING = {"start": time.monotonic(), "pull": 0.0, "mark": 0.0}
 RED = "🔴"
 MARKS = ("🔴", "⭐", "⚠️", "🎯", "🔑", "✅")
 
@@ -122,6 +126,7 @@ def sync(mem: Path, no_sync: bool, out: list):
     # сеть, и они складываются: три банка давали ~18 с из 18.5 с всего старта,
     # причём каждый возвращал «уже актуально». Параллельно — по самому долгому.
     if pullable:
+        t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(pullable)) as pool:
             futures = {name: pool.submit(run, ["git", "pull", "--rebase", "--autostash"], path)
                        for name, path in pullable}
@@ -133,6 +138,7 @@ def sync(mem: Path, no_sync: bool, out: list):
                     out.append(f"- {name}: synced — {state}")
                 else:
                     out.append(f"- {name}: ⚠️ NOT synced — {(se or so).splitlines()[0][:100]}")
+        TIMING["pull"] = time.monotonic() - t0
     if inside:
         out.append(f"- {', '.join(inside)}: в составе репозитория памяти")
     out.append("")
@@ -159,15 +165,22 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: 
     # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
     # репозиторий (было 2026-08-16).
     if is_git(root) and not no_sync:
+        t0 = time.monotonic()
         rel = f".sessions/{sid}.md"
         code, _, _ = run(["git", "add", rel], cwd=root)
         code, _, _ = run(["git", "diff", "--cached", "--quiet", "--", rel], cwd=root)
         if code == 1:  # есть что коммитить
             run(["git", "commit", "-q", "-m", f"sessions: {sid} в работе", "--", rel], cwd=root)
-            pcode, _, perr = run(["git", "push", "-q"], cwd=root, timeout=60)
-            if pcode != 0:
-                out.append(f"- ⚠️ отметка закоммичена, но не запушена: {perr.splitlines()[0][:80]}"
-                           if perr else "- ⚠️ отметка закоммичена, но не запушена")
+            # ⏱ push отметки — 5 с сетевого ожидания, которых старт не должен ждать:
+            # соседи читают доску не в эту же секунду, а нам она уже записана локально.
+            # Отпускаем в фон; провалившийся push всплывёт при следующем pull.
+            try:
+                subprocess.Popen(["git", "push", "-q"], cwd=root,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                out.append("- отметка закоммичена, push ушёл в фоне")
+            except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
+                out.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
+            TIMING["mark"] = time.monotonic() - t0
 
     live, stale = [], []
     for f in sorted(board.glob("*.md")):
@@ -208,8 +221,13 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool, out: 
     out.append("")
 
 
-def tasks(root: Path, out: list):
-    """Горячее — строкой, остальное — счётчиками. Тела задач не читаем."""
+def tasks(root: Path, out: list, working_limit=None):
+    """Горячее — строкой, остальное — счётчиками. Тела задач не читаем.
+
+    `working_limit` — сколько задач «в работе» печатать строками. По умолчанию все:
+    список нужен целиком. Ограничение включается только если ядро дайджеста иначе
+    не проходит лимит вывода (см. вызов в main) — и тогда об усечении сказано вслух.
+    """
     rows = []
     tdir = root / "tasks"
     if tdir.is_dir():
@@ -251,7 +269,7 @@ def tasks(root: Path, out: list):
 
     block("🔥 Срочно и важно", hot)
     block("⏸ Ожидает внешнего действия", waiting)
-    block("🔧 В работе", working)
+    block("🔧 В работе", working, limit=working_limit)
     block("⚡ Срочно, не важно", urgent_only, limit=5)
 
 
@@ -487,13 +505,27 @@ def main():
         print("\n".join(out))
         return
 
-    out = [f"# yamem preflight — {stamp}"
-           + (f" — часть 1/{total}" if args.part else ""), ""]
-    sync(mem, args.no_sync, out)
-    sessions(root, args.sid, args.topic, args.prune, args.no_sync, out)
-    tasks(root, out)
-    banks(mem, out)
-    commits(root, out)
+    head = [f"# yamem preflight — {stamp}"
+            + (f" — часть 1/{total}" if args.part else ""), ""]
+    sync(mem, args.no_sync, head)
+    sessions(root, args.sid, args.topic, args.prune, args.no_sync, head)
+
+    # 🔑 Ядро — единственная часть, которую нельзя нарезать: она растёт вместе
+    # со списком задач в работе (42 строки на 17.08) и однажды упрётся в потолок
+    # вывода молча. Поэтому подбираем, сколько задач влезает, и говорим об этом.
+    out, limit_used = None, None
+    for cand in (None, 30, 20, 12, 6):
+        trial = list(head)
+        tasks(root, trial, working_limit=cand)
+        banks(mem, trial)
+        commits(root, trial)
+        out, limit_used = trial, cand
+        if not args.part or size("\n".join(trial)) + 600 <= HARNESS_LIMIT:
+            break
+    if limit_used is not None:
+        out.append(f"⚠️ список «в работе» усечён до {limit_used}: ядро иначе не проходит "
+                   f"потолок вывода {HARNESS_LIMIT} Б. Весь список — `backlog.md`.")
+        out.append("")
     if args.part:
         out.append(f"## Остальные части — вызывать одним блоком")
         if total > 1:
@@ -515,13 +547,17 @@ def main():
         out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
         out.append("")
     maintenance(root, mem, out, part_mode=bool(args.part))
+    elapsed = time.monotonic() - TIMING["start"]
+    out.append(f"- ⏱ стартер {elapsed:.1f} с: `git pull` {TIMING['pull']:.1f} с, "
+               f"отметка на доске (commit+push) {TIMING['mark']:.1f} с, "
+               f"сборка {elapsed - TIMING['pull'] - TIMING['mark']:.1f} с"
+               f"{' — git пропущен (`--no-sync`)' if args.no_sync else ''}")
+    out.append("")
     if args.part:
-        # ядро не режется на части: если оно само переросло лимит — сказать об этом
-        # вслух, иначе харнес молча подменит вывод превью (как было с частью 2 18.08)
         core = size("\n".join(out))
         if core > HARNESS_LIMIT:
             out.append(f"⚠️ ядро дайджеста {core} Б > потолка вывода {HARNESS_LIMIT} Б — "
-                       f"вывод могло обрезать; сократить задачи в работе или коммиты за сутки")
+                       f"вывод могло обрезать")
         out.append(f"— конец части 1/{total} —")
     print("\n".join(out))
 

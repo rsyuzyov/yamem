@@ -13,9 +13,19 @@
     --no-sync       не трогать git вовсе: ни pull банков, ни коммит отметки
                     (режим для прогона на копии памяти)
     --prune         снести записи брошенных сессий (старше 6 часов)
+    --part K        печатать часть дайджеста: 1 = ядро (синхронизация, соседи,
+                    задачи, банки, коммиты), 2..N = куски сводок дневников.
+                    Без ключа печатается всё одним выводом.
+    --part-limit N  потолок части в символах (по умолчанию 25000)
 
 Печатает markdown в stdout. Задачи и дневники не пересказываются целиком:
 источник правды — сами файлы, стартер лишь показывает, куда смотреть.
+
+🔑 Зачем `--part`: полный дайджест длиннее лимита вывода инструмента (~30 КБ),
+и харнес молча подменяет его превью — данные до модели не доезжают. Части
+запрашиваются **параллельно одним блоком**: это один раунд латентности, но весь
+объём в контексте. Побочные действия (pull, отметка на доске, prune) делает
+только часть 1 — параллельные git-операции в одном репозитории дерутся за индекс.
 """
 import argparse
 import io
@@ -230,8 +240,12 @@ def tasks(root: Path, out: list):
     block("⚡ Срочно, не важно", urgent_only, limit=5)
 
 
-def diary(root: Path, days: int, mode: str, out: list):
-    """Сводки дневников: заголовки дня плюс, по режиму, важные строки."""
+def diary_entries(root: Path, days: int, mode: str) -> list:
+    """Сводки дневников по одной записи на файл: [(имя, текст), ...].
+
+    Собирается отдельно от печати: дайджест может не пройти лимит вывода
+    инструмента целиком, и тогда записи раскладываются по частям (см. `--part`).
+    """
     today = datetime.now().date()
     wanted = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
     files = []
@@ -242,12 +256,7 @@ def diary(root: Path, days: int, mode: str, out: list):
             files += sorted((ddir / month).glob(f"{day}*.md")) if (ddir / month).is_dir() else []
             files += sorted(ddir.glob(f"{day}*.md"))  # старая плоская раскладка
 
-    out.append(f"## Дневники за {days} дн. — {len(files)} файлов, режим `{mode}`")
-    if not files:
-        out.append("- записей нет")
-        out.append("")
-        return
-
+    entries = []
     for f in files:
         text = io.open(f, encoding="utf-8", errors="replace").read()
         if mode == "full":
@@ -262,11 +271,27 @@ def diary(root: Path, days: int, mode: str, out: list):
                 elif mode == "marks" and any(m in line for m in MARKS):
                     keep.append(line.strip())
             body = "\n".join(keep).strip()
-        out.append(f"### {f.name}")
-        out.append(body if body else "_(без заголовков)_")
-        out.append("")
-    out.append(f"⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
-    out.append("")
+        entries.append((f.name, f"### {f.name}\n{body or '_(без заголовков)_'}\n"))
+    return entries
+
+
+def split_entries(entries: list, limit: int) -> list:
+    """Разложить записи по кускам не длиннее `limit` символов.
+
+    Жадно и детерминированно: одни и те же записи всегда лягут одинаково,
+    поэтому части можно запрашивать независимыми параллельными вызовами.
+    Запись длиннее лимита едет отдельным куском — резать её нельзя.
+    """
+    chunks, cur, cur_len = [], [], 0
+    for name, text in entries:
+        if cur and cur_len + len(text) > limit:
+            chunks.append(cur)
+            cur, cur_len = [], 0
+        cur.append((name, text))
+        cur_len += len(text)
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def commits(root: Path, out: list):
@@ -335,6 +360,10 @@ def main():
     ap.add_argument("--diary", default="red", choices=("heads", "red", "marks", "full"))
     ap.add_argument("--no-sync", action="store_true")
     ap.add_argument("--prune", action="store_true", help="снести брошенные записи сессий")
+    ap.add_argument("--part", type=int, default=0,
+                    help="1 = ядро дайджеста, 2..N = куски дневников, 0 = всё одним выводом")
+    ap.add_argument("--part-limit", type=int, default=25000,
+                    help="потолок части в символах (лимит вывода инструмента ~30К)")
     args = ap.parse_args()
 
     if hasattr(sys.stdout, "reconfigure"):  # эмодзи в выводе на Windows
@@ -355,14 +384,58 @@ def main():
             m = re.search(r"diary_read_days:\s*(\d+)", cfg.read_text(encoding="utf-8"))
             days = int(m.group(1)) if m else 7
 
-    out = [f"# yamem preflight — {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+    entries = diary_entries(root, days, args.diary)
+    chunks = split_entries(entries, args.part_limit) if args.part else []
+    total = 1 + len(chunks)  # ядро + куски дневников
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ⚠️ Побочные действия (pull банков, отметка на доске, prune) делает ТОЛЬКО часть 1:
+    # части запрашиваются параллельно, и три одновременных git-операции в одном
+    # репозитории дерутся за индекс. Остальные части — чистое чтение.
+    if args.part >= 2:
+        idx = args.part - 2
+        out = [f"# yamem preflight — часть {args.part}/{total}: дневники", ""]
+        if idx < len(chunks):
+            names = [n for n, _ in chunks[idx]]
+            out.append(f"## Дневники за {days} дн., записи {names[0]} … {names[-1]}"
+                       f" ({len(names)} из {len(entries)}), режим `{args.diary}`")
+            out.append("")
+            out += [text for _, text in chunks[idx]]
+            out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
+        else:
+            out.append(f"_(пусто: всего частей {total})_")
+        out.append(f"— конец части {args.part}/{total} —")
+        print("\n".join(out))
+        return
+
+    out = [f"# yamem preflight — {stamp}"
+           + (f" — часть 1/{total}" if args.part else ""), ""]
     sync(mem, args.no_sync, out)
     sessions(root, args.sid, args.topic, args.prune, args.no_sync, out)
     tasks(root, out)
     banks(mem, out)
     commits(root, out)
-    diary(root, days, args.diary, out)
+    if args.part:
+        out.append(f"## Дневники за {days} дн. — {len(entries)} файлов, режим `{args.diary}`")
+        if total > 1:
+            rest = ", ".join(f"`--part {i}`" for i in range(2, total + 1))
+            out.append(f"- сводки приходят частями: {rest} — вызывать **одним блоком**, "
+                       f"это один раунд")
+            if args.part == 1 and total > 3:
+                out.append(f"- ⚠️ частей больше трёх ({total}): дневники разрослись, "
+                           f"стоит уменьшить `diary_read_days` или почистить")
+        else:
+            out.append("- записей нет")
+        out.append("")
+    else:
+        out.append(f"## Дневники за {days} дн. — {len(entries)} файлов, режим `{args.diary}`")
+        out.append("")
+        out += [text for _, text in entries] or ["- записей нет", ""]
+        out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
+        out.append("")
     maintenance(root, mem, out)
+    if args.part:
+        out.append(f"— конец части 1/{total} —")
     print("\n".join(out))
 
 

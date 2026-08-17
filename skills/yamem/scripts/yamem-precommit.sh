@@ -3,7 +3,7 @@
 #
 # Ставится один раз в глобальный хук (или в .git/hooks/pre-commit репозитория памяти):
 #
-#     sh "$HOME/repo/ai/yamem/scripts/yamem-precommit.sh" || exit 1
+#     sh "$HOME/.claude/skills/yamem/scripts/yamem-precommit.sh" || exit 1
 #
 # Смысл: `backlog.md`, `archive.md` и раздел «База знаний» в MEMORY.md собираются
 # из фронтматтеров. Без проверки они устаревают молча — файл в git выглядит живым,
@@ -29,11 +29,17 @@ elif [ -f "$root/.agents/memory/yamem.config.yaml" ] &&
 fi
 [ -n "$mem" ] || exit 0
 
-# Где генераторы: переменная окружения, привычная раскладка, каталог плагинов.
+# Где генераторы. 🔑 С 2026-08-17 они лежат ВНУТРИ каталога навыка (`skills/yamem/scripts`),
+# чтобы ехать вместе с ним при любом способе подключения; старые пути оставлены как фолбэк.
 scripts=""
 for candidate in \
+    "$YAMEM_HOME/skills/yamem/scripts" \
     "$YAMEM_HOME/scripts" \
+    "$HOME/.claude/skills/yamem/scripts" \
+    "$HOME/repo/ai/yamem/skills/yamem/scripts" \
     "$HOME/repo/ai/yamem/scripts" \
+    "$HOME"/.claude/plugins/cache/*/yamem/*/skills/yamem/scripts \
+    "$HOME"/.claude/plugins/*/yamem/skills/yamem/scripts \
     "$HOME"/.claude/plugins/*/yamem/scripts \
     "$HOME"/.claude/plugins/yamem/scripts
 do

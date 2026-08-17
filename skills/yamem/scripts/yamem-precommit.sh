@@ -29,13 +29,24 @@ elif [ -f "$root/.agents/memory/yamem.config.yaml" ] &&
 fi
 [ -n "$mem" ] || exit 0
 
+# ⏱ Отметка на доске сессий (`.sessions/<sid>.md`) не влияет ни на представления,
+# ни на индекс топиков — проверять тут нечего. А полный прогон генераторов читает
+# все задачи и топики и стоит ~3 с, которые платит КАЖДЫЙ старт сессии.
+staged=$(git diff --cached --name-only)
+if [ -n "$staged" ] && ! printf '%s\n' "$staged" | grep -qv '\.sessions/'; then
+    exit 0
+fi
+
 # Где генераторы. 🔑 С 2026-08-17 они лежат ВНУТРИ каталога навыка (`skills/yamem/scripts`),
 # чтобы ехать вместе с ним при любом способе подключения; старые пути оставлены как фолбэк.
 scripts=""
 for candidate in \
+    "$(dirname "$0")" \
     "$YAMEM_HOME/skills/yamem/scripts" \
     "$YAMEM_HOME/scripts" \
     "$HOME/.claude/skills/yamem/scripts" \
+    "$HOME"/repo/*/.claude/skills/yamem/scripts \
+    "$HOME"/repo/*/.agents/skills/yamem/skills/yamem/scripts \
     "$HOME/repo/ai/yamem/skills/yamem/scripts" \
     "$HOME/repo/ai/yamem/scripts" \
     "$HOME"/.claude/plugins/cache/*/yamem/*/skills/yamem/scripts \

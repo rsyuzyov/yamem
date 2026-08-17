@@ -40,6 +40,9 @@ from yamem_common import journal_root, parse_frontmatter, read_config, truthy
 
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 SESSION_STALE_HOURS = 6
+# сколько байт харнес пропускает в выводе инструмента, дальше подменяет превью;
+# `--part-limit` держим ниже с запасом, а по этому порогу только предупреждаем
+HARNESS_LIMIT = 28000
 RED = "🔴"
 MARKS = ("🔴", "⭐", "⚠️", "🎯", "🔑", "✅")
 
@@ -252,6 +255,33 @@ def tasks(root: Path, out: list):
     block("⚡ Срочно, не важно", urgent_only, limit=5)
 
 
+def memory_entries(root: Path) -> list:
+    """`MEMORY.md` кусками по смысловым блокам: [(раздел, текст), ...].
+
+    🔑 Файл читается КАЖДОЙ сессией целиком — это не «куда посмотреть», а часть
+    preflight. Раньше стартер его намеренно не отдавал, и модель читала сама:
+    90 КБ ≈ 33К токенов при потолке `Read` в 25К ⟹ три вызова подряд, три раунда
+    латентности (~35 с) на ровном месте. Теперь он едет теми же частями.
+
+    Границы блоков — строки верхнего уровня (`#`, `- `, `> `), чтобы кусок не
+    рвался посреди факта, а продолжения с отступом ехали со своим пунктом.
+    """
+    f = root / "MEMORY.md"
+    if not f.is_file():
+        return []
+    blocks, cur, section = [], [], "начало"
+    for line in f.read_text(encoding="utf-8", errors="replace").split("\n"):
+        if cur and (line.startswith("#") or line.startswith("- ") or line.startswith("> ")):
+            blocks.append((section, "\n".join(cur).rstrip() + "\n"))
+            cur = []
+        if line.startswith("#"):
+            section = line.lstrip("# ").strip() or section
+        cur.append(line)
+    if cur:
+        blocks.append((section, "\n".join(cur).rstrip() + "\n"))
+    return [b for b in blocks if b[1].strip()]
+
+
 def diary_entries(root: Path, days: int, mode: str) -> list:
     """Сводки дневников по одной записи на файл: [(имя, текст), ...].
 
@@ -359,12 +389,15 @@ def banks(mem: Path, out: list):
     out.append("")
 
 
-def maintenance(root: Path, mem: Path, out: list):
+def maintenance(root: Path, mem: Path, out: list, part_mode: bool = False):
     memory_md = root / "MEMORY.md"
     out.append("## Дальше")
     if memory_md.is_file():
-        size = memory_md.stat().st_size
-        out.append(f"- прочитай `MEMORY.md` ({size // 1024} КБ) — стартер его не пересказывает")
+        kb = memory_md.stat().st_size // 1024
+        if part_mode:
+            out.append(f"- `MEMORY.md` ({kb} КБ) приезжает частями выше — отдельно не читай")
+        else:
+            out.append(f"- прочитай `MEMORY.md` ({kb} КБ) — стартер его не пересказывает")
         text = memory_md.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"Последняя оптимизация:\s*(\d{4}-\d{2}-\d{2})", text)
         if m:
@@ -418,8 +451,9 @@ def main():
             days = int(m.group(1)) if m else 7
 
     entries = diary_entries(root, days, args.diary)
+    mem_chunks = split_entries(memory_entries(root), args.part_limit) if args.part else []
     chunks = split_entries(entries, args.part_limit) if args.part else []
-    total = 1 + len(chunks)  # ядро + куски дневников
+    total = 1 + len(mem_chunks) + len(chunks)  # ядро + MEMORY.md + дневники
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ⚠️ Побочные действия (pull банков, отметка на доске, prune) делает ТОЛЬКО часть 1:
@@ -427,16 +461,28 @@ def main():
     # репозитории дерутся за индекс. Остальные части — чистое чтение.
     if args.part >= 2:
         idx = args.part - 2
-        out = [f"# yamem preflight — часть {args.part}/{total}: дневники", ""]
-        if idx < len(chunks):
-            names = [n for n, _ in chunks[idx]]
-            out.append(f"## Дневники за {days} дн., записи {names[0]} … {names[-1]}"
-                       f" ({len(names)} из {len(entries)}), режим `{args.diary}`")
+        if idx < len(mem_chunks):  # сначала MEMORY.md, потом дневники
+            piece = mem_chunks[idx]
+            secs = list(dict.fromkeys(s for s, _ in piece))
+            out = [f"# yamem preflight — часть {args.part}/{total}: MEMORY.md", ""]
+            out.append(f"## MEMORY.md, разделы: {', '.join(secs)}"
+                       f" (кусок {idx + 1} из {len(mem_chunks)})")
             out.append("")
-            out += [text for _, text in chunks[idx]]
-            out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
+            out += [text for _, text in piece]
+            if idx + 1 == len(mem_chunks):
+                out.append("⚠️ Это полный текст `MEMORY.md`, читать его отдельно не нужно.")
         else:
-            out.append(f"_(пусто: всего частей {total})_")
+            idx -= len(mem_chunks)
+            out = [f"# yamem preflight — часть {args.part}/{total}: дневники", ""]
+            if idx < len(chunks):
+                names = [n for n, _ in chunks[idx]]
+                out.append(f"## Дневники за {days} дн., записи {names[0]} … {names[-1]}"
+                           f" ({len(names)} из {len(entries)}), режим `{args.diary}`")
+                out.append("")
+                out += [text for _, text in chunks[idx]]
+                out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
+            else:
+                out.append(f"_(пусто: всего частей {total})_")
         out.append(f"— конец части {args.part}/{total} —")
         print("\n".join(out))
         return
@@ -449,16 +495,18 @@ def main():
     banks(mem, out)
     commits(root, out)
     if args.part:
-        out.append(f"## Дневники за {days} дн. — {len(entries)} файлов, режим `{args.diary}`")
+        out.append(f"## Остальные части — вызывать одним блоком")
         if total > 1:
-            rest = ", ".join(f"`--part {i}`" for i in range(2, total + 1))
-            out.append(f"- сводки приходят частями: {rest} — вызывать **одним блоком**, "
-                       f"это один раунд")
-            if args.part == 1 and total > 3:
-                out.append(f"- ⚠️ частей больше трёх ({total}): дневники разрослись, "
-                           f"стоит уменьшить `diary_read_days` или почистить")
+            mem_last = 1 + len(mem_chunks)
+            if mem_chunks:
+                out.append(f"- `--part 2`…`--part {mem_last}` — **MEMORY.md** целиком"
+                           f" ({len(mem_chunks)} шт.), отдельно его читать не нужно")
+            if chunks:
+                out.append(f"- `--part {mem_last + 1}`…`--part {total}` — сводки дневников"
+                           f" за {days} дн. ({len(entries)} файлов, режим `{args.diary}`)")
+            out.append(f"- всего частей **{total}** — это один раунд, если отправить их вместе")
         else:
-            out.append("- записей нет")
+            out.append("- больше частей нет")
         out.append("")
     else:
         out.append(f"## Дневники за {days} дн. — {len(entries)} файлов, режим `{args.diary}`")
@@ -466,13 +514,13 @@ def main():
         out += [text for _, text in entries] or ["- записей нет", ""]
         out.append("⚠️ Это сводка. Полный текст дня — читать сам файл в `diary/`.")
         out.append("")
-    maintenance(root, mem, out)
+    maintenance(root, mem, out, part_mode=bool(args.part))
     if args.part:
         # ядро не режется на части: если оно само переросло лимит — сказать об этом
         # вслух, иначе харнес молча подменит вывод превью (как было с частью 2 18.08)
         core = size("\n".join(out))
-        if core > args.part_limit:
-            out.append(f"⚠️ ядро дайджеста {core} Б > лимита {args.part_limit} Б — "
+        if core > HARNESS_LIMIT:
+            out.append(f"⚠️ ядро дайджеста {core} Б > потолка вывода {HARNESS_LIMIT} Б — "
                        f"вывод могло обрезать; сократить задачи в работе или коммиты за сутки")
         out.append(f"— конец части 1/{total} —")
     print("\n".join(out))

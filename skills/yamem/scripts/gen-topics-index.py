@@ -16,15 +16,19 @@
 
     python scripts/gen-topics-index.py [--memory <path>] [--apply] [--check]
 
-`--check` завершается с ненулевым кодом, если индекс разошёлся с топиками
-(для проверки перед коммитом).
+`--check` завершается с ненулевым кодом, если индекс разошёлся с топиками либо
+у топика битый фронтматтер (для проверки перед коммитом). ⚠️ Проверка формы —
+СТРОГАЯ, в отличие от чтения: толерантный разбор `ключ: значение` пропускал
+невалидный YAML, индекс собирался зелёным, а сторонний парсер на том же файле
+падал. Вкусовые замечания печатаются, но кода возврата не портят.
 """
 import argparse
 import os
 import sys
 from pathlib import Path
 
-from yamem_common import journal_root, parse_frontmatter, read_banks, splice
+from yamem_common import (journal_root, parse_frontmatter, read_banks, splice,
+                          validate_frontmatter)
 
 BEGIN = "<!-- yamem:topics-index:begin -->"
 END = "<!-- yamem:topics-index:end -->"
@@ -32,6 +36,8 @@ GENERATED_NOTE = "<!-- сгенерировано scripts/gen-topics-index.py �
 
 # порядок разделов в индексе; `type` вне списка попадает в конец, своей группой
 TYPE_ORDER = ["rule", "recipe", "reference", "incident"]
+# ниже этой длины `description` перестаёт отвечать на вопрос «когда сюда идти»
+DESC_MIN = 25
 TYPE_TITLE = {
     "rule": "Правила и договорённости",
     "recipe": "Рецепты — как сделать",
@@ -41,21 +47,39 @@ TYPE_TITLE = {
 
 
 def collect(topics_dir: Path, bank_root: Path):
-    """Топики банка: (относительный путь, type, description). Без фронтматтера — в жалобы."""
-    rows, complaints = [], []
+    """Топики банка: (rows, дефекты, замечания).
+
+    Дефект — то, из-за чего индекс врёт или файл не читается сторонним инструментом;
+    от него `--check` краснеет. Замечание — вкусовое, печатается и код не портит:
+    pre-commit не должен вставать из-за формулировки.
+    """
+    rows, defects, notes = [], [], []
     for f in sorted(topics_dir.glob("*.md")):
         if f.name in ("index.md", "log.md", "README.md"):
             continue
-        fm = parse_frontmatter(f)
         rel = f.relative_to(bank_root).as_posix()
-        if not fm.get("type"):
-            complaints.append(f"{bank_root.name}/{rel}: нет `type` во фронтматтере")
+        where = f"{bank_root.name}/{rel}"
+        # 🔑 сначала строгая проверка формы, потом толерантное чтение: генератор обязан
+        # собраться и на кривом файле, но `--check` про кривизну знать обязан
+        defects += [f"{where}: {p}" for p in validate_frontmatter(f)]
+        fm = parse_frontmatter(f)
+        typ = fm.get("type", "").strip()
+        if not typ:
+            defects.append(f"{where}: нет `type` во фронтматтере")
             continue
+        if typ not in TYPE_TITLE:
+            defects.append(
+                f"{where}: `type: {typ}` вне набора {'/'.join(TYPE_ORDER)} — "
+                "топик-солянка расщепляется, а не получает пятое значение")
         desc = fm.get("description", "").strip()
         if not desc:
-            complaints.append(f"{bank_root.name}/{rel}: нет `description`")
-        rows.append((rel, fm["type"], desc))
-    return rows, complaints
+            defects.append(f"{where}: нет `description`")
+        elif len(desc) < DESC_MIN:
+            notes.append(
+                f"{where}: `description` короче {DESC_MIN} символов — это условие обращения "
+                "(«когда сюда идти»), а не заголовок")
+        rows.append((rel, typ, desc))
+    return rows, defects, notes
 
 
 def render(groups, link_prefix: str) -> str:
@@ -97,10 +121,11 @@ def main():
         print(f"в {mem} нет ни одного банка с topics/ — индексировать нечего")
         return
 
-    all_groups, complaints, changed = [], [], []
+    all_groups, defects, notes, changed = [], [], [], []
     for name, root, topics in banks:
-        rows, warn = collect(topics, root)
-        complaints += warn
+        rows, bad, warn = collect(topics, root)
+        defects += bad
+        notes += warn
         all_groups.append((f"Банк `{name}`", rows, root))
 
     # 1) сводный индекс в MEMORY.md — только если там ещё стоят маркеры.
@@ -128,13 +153,15 @@ def main():
 
     total = sum(len(rows) for _, rows, _ in all_groups)
     print(f"топиков: {total} в {len(banks)} банках")
-    for c in complaints:
+    for c in defects:
+        print("  🔴", c)
+    for c in notes:
         print("  ⚠️", c)
     for p in changed:
         print(("обновлён: " if args.apply else "изменится: ") + str(p))
     if not changed:
         print("индекс актуален")
-    if args.check and (changed or complaints):
+    if args.check and (changed or defects):
         sys.exit(1)
 
 

@@ -20,7 +20,8 @@ import re
 import sys
 from pathlib import Path
 
-from yamem_common import journal_root, md_cell, parse_frontmatter, splice
+from yamem_common import (journal_root, md_cell, parse_frontmatter, splice,
+                          validate_frontmatter)
 
 BACKLOG_BEGIN = "<!-- yamem:backlog:begin -->"
 BACKLOG_END = "<!-- yamem:backlog:end -->"
@@ -69,6 +70,10 @@ def collect(tasks_dir: Path):
         if not task_md.is_file():
             complaints.append(f"tasks/{rel}/: нет task.md")
             return
+        # 🔑 форму проверяем строго, а читаем толерантно: `title: ЭДО prodline: адреса`
+        # без кавычек разбирается «наполовину» и молча уезжает в бэклог обрезанным
+        for problem in validate_frontmatter(task_md):
+            complaints.append(f"tasks/{rel}/task.md: {problem}")
         fm = parse_frontmatter(task_md)
         if not fm:
             complaints.append(f"tasks/{rel}/task.md: нет фронтматтера")

@@ -30,6 +30,97 @@ def parse_frontmatter(path: Path) -> dict:
     return out
 
 
+# символы, с которых значение в YAML начинать нельзя без кавычек. `[` и `{` сюда НЕ входят:
+# это валидные flow-коллекции (`keywords: [a, b]` — легальное расширение фронтматтера)
+_YAML_SPECIAL_START = "*&!%@`>|"
+
+
+def _first_line(block: str) -> str:
+    """Первая строка сообщения YAML-парсера — для случая, когда эвристики промолчали."""
+    import yaml
+    try:
+        yaml.safe_load(block)
+    except Exception as e:
+        return str(e).splitlines()[0]
+    return "неизвестная причина"
+
+
+def validate_frontmatter(path: Path) -> list:
+    """Структурные дефекты фронтматтера — то, из-за чего значение молча теряется.
+
+    🔑 Проверяем СТРОГО, а не так, как читаем. `parse_frontmatter` намеренно
+    толерантен: вытаскивает всё, что похоже на `ключ: значение`, и едет дальше.
+    Из-за этого невалидный YAML проходил генерацию зелёным, а сторонний инструмент
+    на том же файле падал — прецедент 2026-08-20: `description` с двоеточием без
+    кавычек в двух топиках, индекс собирался, `yaml.safe_load` падал.
+
+    Судит настоящий парсер, если PyYAML в среде есть; жёсткой зависимости не
+    заводим — скрипты обязаны работать на голом python, на машине коллеги пакета
+    может не быть. Без PyYAML те же дефекты ловятся эвристиками (грубее, но ловятся).
+
+    Возвращает список сообщений; пустой список — файл в порядке.
+    """
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return ["BOM в начале файла — фронтматтер не распознаётся ни одним парсером"]
+    # ⚠️ CRLF нормализуем сами: читаем байтами (ради BOM), а universal newlines тут
+    # не работает — файл из Windows-редактора иначе выглядит как «нет фронтматтера»
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n")
+    if not text.startswith("---\n"):
+        if text.lstrip().startswith("---\n"):
+            return ["фронтматтер не в первой строке файла (перед ним пустые строки)"]
+        return ["нет фронтматтера"]
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return ["фронтматтер не закрыт строкой `---`"]
+    block = text[4:end + 1]
+
+    try:
+        import yaml
+    except ImportError:
+        return _frontmatter_heuristics(block)
+
+    try:
+        data = yaml.safe_load(block)
+    except Exception:
+        # ⚠️ Текст ошибки YAML указывает на СЛЕДСТВИЕ («mapping values are not allowed»),
+        # а править надо причину — её точнее называют эвристики, поэтому их и печатаем
+        return _frontmatter_heuristics(block) or ["YAML не парсится: %s" % _first_line(block)]
+    if data is None:
+        return ["фронтматтер пуст"]
+    if not isinstance(data, dict):
+        return ["фронтматтер разобрался не в набор ключей — проверь пробел после `ключ:`"]
+    return []
+
+
+def _frontmatter_heuristics(block: str) -> list:
+    """Фолбэк без PyYAML: те же дефекты, но распознанные грубо."""
+    problems = []
+    for n, line in enumerate(block.splitlines(), start=2):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0] in " \t-":            # продолжение блока или список — плоский разбор их не берёт
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*):(\s*)(.*)$", line)
+        if not m:
+            problems.append("строка %d: не `ключ: значение` — `%s`" % (n, line.strip()[:60]))
+            continue
+        key, gap, val = m.group(1), m.group(2), m.group(3).strip()
+        if val and not gap:
+            problems.append("строка %d: после `%s:` нужен пробел" % (n, key))
+        quoted = len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'"
+        if not val or quoted or val[0] in "[{":
+            continue
+        if ": " in val or val.endswith(":"):
+            problems.append("`%s`: значение содержит двоеточие — взять в кавычки, "
+                            "иначе YAML читает его как вложенный ключ" % key)
+        elif val[0] in _YAML_SPECIAL_START:
+            problems.append("`%s`: значение начинается с `%s` — взять в кавычки" % (key, val[0]))
+        elif val[0] in "\"'" and not val.endswith(val[0]):
+            problems.append("`%s`: значение открыто кавычкой и не закрыто" % key)
+    return problems
+
+
 def truthy(v) -> bool:
     return str(v).strip().lower() in ("true", "yes", "да", "1", "+")
 

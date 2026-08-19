@@ -319,13 +319,18 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         mark = "⚫" if r["file"] is None or r["sid"] in removed else "⚪"
         tail = (f" ↳ {r['acts'][-1]['subject'][:70]}" if r["acts"]
                 else " ⚠️ **без следа**")
-        out.append(f"- {mark} {r['sid']} · {r['upd'].strftime('%H:%M')} · "
+        # ⚠️ Возраст, а не время суток. Строка попадает сюда и сортируется по
+        # ПОСЛЕДНЕЙ АКТИВНОСТИ (`last`), а печаталось время отметки (`upd`) — и без
+        # даты. 19.08 так соврали все семь строк разом: отметки были вчерашние и
+        # позавчерашние, пять из них показывали время ПОЗЖЕ текущего (20:50 в 12:46),
+        # а подпись под списком уверяла, что тему брали сегодня. Один счёт с 🔵.
+        out.append(f"- {mark} {r['sid']} · {ago(now, r['last'])} · "
                    f"{r['topic'][:70]} —{tail}")
     if len(past) > SESSION_SHOW_MAX:
         out.append(f"- …ещё {len(past) - SESSION_SHOW_MAX} сессий за сутки")
     if past:
-        out.append("🔁 Темы выше сегодня УЖЕ брали; «без следа» = следа в памяти нет, "
-                   "а не «не сделано».")
+        out.append("🔁 Темы выше УЖЕ брали за последние сутки; «без следа» = следа "
+                   "в памяти нет, а не «не сделано».")
     if removed:
         out.append(f"- снято брошенных записей (старше "
                    f"{int(drop_after.total_seconds() // 3600)} ч): {len(removed)}")

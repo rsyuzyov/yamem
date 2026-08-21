@@ -438,13 +438,71 @@ def deadlines_block(rows: list, root: Path, out: list, horizon: int = 45, limit:
     out.append("")
 
 
-def tasks(root: Path, out: list, working_limit=None):
-    """Горячее — строкой, остальное — счётчиками. Тела задач не читаем.
+PROMPT_RE = re.compile(r"(?i)prompt")
 
-    `working_limit` — сколько задач «в работе» печатать строками. По умолчанию все:
-    список нужен целиком. Ограничение включается только если ядро дайджеста иначе
-    не проходит лимит вывода (см. вызов в main) — и тогда об усечении сказано вслух.
+
+def prompt_of(tasks_dir: Path, rel: str):
+    """Дата правки файла-промпта задачи либо None — точка входа в длинную работу.
+
+    Канон — `prompt-next-session.md`; прежние имена (`next-session-prompt.md`,
+    `prompt-<дата>.md`) распознаём тоже, иначе уже написанные промпты пропадут из вида.
     """
+    folder = tasks_dir / rel
+    if not folder.is_dir():
+        return None
+    canon = folder / "prompt-next-session.md"
+    found = canon if canon.is_file() else next(
+        (p for p in sorted(folder.glob("*.md")) if PROMPT_RE.search(p.name)), None)
+    if not found:
+        return None
+    return datetime.fromtimestamp(found.stat().st_mtime).strftime("%d.%m")
+
+
+def epic_index(rows):
+    """{rel темы: [(rel, поля) подзадач]}. Тема — та задача, на которую сослались."""
+    by_slug = {}
+    for rel, _fm in rows:
+        by_slug.setdefault(rel.split("/")[-1], []).append(rel)
+    index = {}
+    for rel, fm in rows:
+        ref = (fm.get("epic") or "").strip().strip("/").split("/")[-1]
+        if not ref:
+            continue
+        targets = by_slug.get(ref, [])
+        if len(targets) == 1 and targets[0] != rel:
+            index.setdefault(targets[0], []).append((rel, fm))
+    return index
+
+
+def epics_block(rows, index, tasks_dir: Path, out: list):
+    """Темы — одной строкой каждая: счётчики подзадач и признак промпта.
+
+    🎯 Это и ответ на «продолжаем X», и то, что снимает разбухание дайджеста:
+    22 строки одной темы сворачиваются в одну, а подзадачи остаются доступны
+    в полном списке задач (он едет отдельными частями и не усекается).
+    """
+    fm_of = dict(rows)
+    live = {rel: kids for rel, kids in index.items()
+            if fm_of.get(rel, {}).get("status") != "done"
+            or any(f.get("status") != "done" for _, f in kids)}
+    if not live:
+        return
+    out.append(f"**☂ Темы** ({len(live)})")
+    for rel in sorted(live, key=lambda r: fm_of.get(r, {}).get("updated", ""), reverse=True):
+        kids, fm = live[rel], fm_of.get(rel, {})
+        n = lambda s: sum(1 for _, f in kids if f.get("status") == s)  # noqa: E731
+        parts = [f"{n('in-progress')} в работе", f"{n('waiting')} ждут", f"{n('new')} новых"]
+        counts = ", ".join(p for p in parts if not p.startswith("0 "))
+        pr = prompt_of(tasks_dir, rel)
+        tail = f" · 📝 промпт {pr}" if pr else " · ⚠️ промпта нет"
+        out.append(f"- {fm.get('title', rel)} — `tasks/{rel}/` · "
+                   f"{len(kids)} подзадач: {counts or 'все закрыты'}{tail}")
+    out.append("↳ «Продолжаем <тема>» — читать промпт темы, а не выбирать подзадачу по заголовку.")
+    out.append("")
+
+
+def read_tasks(root: Path):
+    """[(rel, поля)] по всем задачам памяти. Тела не читаем."""
     rows = []
     tdir = root / "tasks"
     if tdir.is_dir():
@@ -455,6 +513,64 @@ def tasks(root: Path, out: list, working_limit=None):
                 f = folder / "task.md"
                 if f.is_file():
                     rows.append((f"{month.name}/{folder.name}", parse_frontmatter(f)))
+    return rows
+
+
+def task_line(rel, fm) -> str:
+    area = fm.get("area", "")
+    tail = f" · {area}" if area else ""
+    return f"- {fm.get('title', rel)} — `tasks/{rel}/` · {fm.get('updated', '—')}{tail}"
+
+
+def task_entries(root: Path) -> list:
+    """Полный список открытых задач кусками для частей: [(имя секции, текст)].
+
+    🔑 Заводится ради того, чтобы список НЕ усекался. Раньше ядро подбирало,
+    сколько задач «в работе» влезает в потолок вывода, и остаток пропадал —
+    задача из хвоста была невидима сессии, пока та не откроет `backlog.md` руками.
+    """
+    rows = read_tasks(root)
+    openable = [r for r in rows if r[1].get("status") != "done"]
+    index = epic_index(rows)
+    of_epic = {kid: rel.split("/")[-1] for rel, kids in index.items() for kid, _ in kids}
+    by = lambda s: [r for r in openable if r[1].get("status") == s]  # noqa: E731
+    rest = [r for r in openable if r[1].get("status") not in ("in-progress", "waiting")]
+    quad = lambda u, i: [r for r in rest if truthy(r[1].get("urgent")) == u  # noqa: E731
+                         and truthy(r[1].get("important")) == i]
+
+    entries = []
+    for title, section in (("🔧 В работе", by("in-progress")),
+                           ("⏸ Ожидает внешнего действия", by("waiting")),
+                           ("🔥 Срочно и важно", quad(True, True)),
+                           ("⭐ Важно, не срочно", quad(False, True)),
+                           ("⚡ Срочно, не важно", quad(True, False)),
+                           ("💤 Идеи — ни срочно, ни важно", quad(False, False))):
+        if not section:
+            continue
+        section = sorted(section, key=lambda r: r[1].get("updated", ""), reverse=True)
+        # Секцию режем на куски по 40 строк: одна «Важно, не срочно» на 158 задач
+        # иначе едет неделимой записью и сама перерастает потолок части.
+        for i in range(0, len(section), 40):
+            piece = section[i:i + 40]
+            head = f"### {title} ({len(section)})" + (
+                f" — {i + 1}–{i + len(piece)}" if len(section) > 40 else "")
+            body = [head]
+            for rel, fm in piece:
+                line = task_line(rel, fm)
+                if rel in of_epic:
+                    line += f" · ☂ `{of_epic[rel]}`"
+                body.append(line)
+            entries.append((title, "\n".join(body) + "\n"))
+    return entries
+
+
+def tasks(root: Path, out: list, working_limit=None, part_hint=""):
+    """Горячее — строкой, остальное — счётчиками. Тела задач не читаем.
+
+    `working_limit` — сколько задач «в работе» печатать в ЯДРЕ. Остаток не
+    теряется: полный список едет отдельными частями (`part_hint` называет какими).
+    """
+    rows = read_tasks(root)
 
     openable = [r for r in rows if r[1].get("status") != "done"]
     by = lambda s: [r for r in openable if r[1].get("status") == s]  # noqa: E731
@@ -477,15 +593,18 @@ def tasks(root: Path, out: list, working_limit=None):
         shown = section if limit is None else section[:limit]
         out.append(f"**{title}** ({len(section)})")
         for rel, fm in shown:
-            area = fm.get("area", "")
-            tail = f" · {area}" if area else ""
-            out.append(f"- {fm.get('title', rel)} — `tasks/{rel}/` · {fm.get('updated', '—')}{tail}")
+            out.append(task_line(rel, fm))
         if limit is not None and len(section) > limit:
-            out.append(f"- … ещё {len(section) - limit}, весь список — `backlog.md`")
+            # ⚠️ Не «смотри backlog.md»: остаток едет частями, читать его отдельным
+            # файлом = лишний раунд. Куда именно — говорит part_hint.
+            out.append(f"- … ещё {len(section) - limit} — полный список {part_hint}"
+                       if part_hint else
+                       f"- … ещё {len(section) - limit}, весь список — `backlog.md`")
         out.append("")
 
     block("🔥 Срочно и важно", hot)
     deadlines_block([(rel, fm, fm.get("title", rel)) for rel, fm in openable], root, out)
+    epics_block(rows, epic_index(rows), root / "tasks", out)
     block("⏸ Ожидает внешнего действия", waiting)
     block("🔧 В работе", working, limit=working_limit)
     block("⚡ Срочно, не важно", urgent_only, limit=5)
@@ -700,17 +819,35 @@ def main():
             days = int(m.group(1)) if m else 7
 
     entries = diary_entries(root, days, args.diary)
+    task_chunks = split_entries(task_entries(root), args.part_limit) if args.part else []
     mem_chunks = split_entries(memory_entries(root), args.part_limit) if args.part else []
     chunks = split_entries(entries, args.part_limit) if args.part else []
-    total = 1 + len(mem_chunks) + len(chunks)  # ядро + MEMORY.md + дневники
+    # ядро + полный список задач + MEMORY.md + дневники
+    total = 1 + len(task_chunks) + len(mem_chunks) + len(chunks)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    task_first = 2
+    mem_first = task_first + len(task_chunks)
+    diary_first = mem_first + len(mem_chunks)
 
     # ⚠️ Побочные действия (pull банков, отметка на доске, prune) делает ТОЛЬКО часть 1:
     # части запрашиваются параллельно, и три одновременных git-операции в одном
     # репозитории дерутся за индекс. Остальные части — чистое чтение.
     if args.part >= 2:
         idx = args.part - 2
-        if idx < len(mem_chunks):  # сначала MEMORY.md, потом дневники
+        if idx < len(task_chunks):  # задачи → MEMORY.md → дневники
+            piece = task_chunks[idx]
+            out = [f"# yamem preflight — часть {args.part}/{total}: задачи", ""]
+            out.append(f"## Полный список открытых задач (кусок {idx + 1} из {len(task_chunks)})")
+            out.append("")
+            out += [text for _, text in piece]
+            if idx + 1 == len(task_chunks):
+                out.append("⚠️ Это полный список открытых задач — он не усечён, "
+                           "`backlog.md` отдельно читать не нужно.")
+            out.append(f"— конец части {args.part}/{total} —")
+            print("\n".join(out))
+            return
+        idx -= len(task_chunks)
+        if idx < len(mem_chunks):
             piece = mem_chunks[idx]
             secs = list(dict.fromkeys(s for s, _ in piece))
             out = [f"# yamem preflight — часть {args.part}/{total}: MEMORY.md", ""]
@@ -745,34 +882,52 @@ def main():
     # 🔑 Ядро — единственная часть, которую нельзя нарезать: она растёт вместе
     # со списком задач в работе (42 строки на 17.08) и однажды упрётся в потолок
     # вывода молча. Поэтому подбираем, сколько задач влезает, и говорим об этом.
+    hint = (f"— части `--part {task_first}`…`--part {mem_first - 1}`"
+            if task_chunks else "")
     out, limit_used = None, None
     for cand in (None, 30, 20, 12, 6):
         trial = list(head)
-        tasks(root, trial, working_limit=cand)
+        tasks(root, trial, working_limit=cand, part_hint=hint)
         banks(mem, trial)
         commits(root, trial, log, shown)
         out, limit_used = trial, cand
-        if not args.part or size("\n".join(trial)) + 600 <= HARNESS_LIMIT:
+        # ⚠️ Запас на футер (раскладка частей, напоминания, тайминг) — и на рост
+        # соседних блоков между прогонами: банки и список сессий пухнут сами.
+        # 🔴 На 600 Б ядро выходило 27.5 КБ при потолке 28 КБ — один новый банк
+        # и вывод молча обрезался бы, а обрезание ядра не видно из сессии.
+        if not args.part or size("\n".join(trial)) + 2500 <= HARNESS_LIMIT:
             break
     if limit_used is not None:
-        out.append(f"⚠️ список «в работе» усечён до {limit_used}: ядро иначе не проходит "
-                   f"потолок вывода {HARNESS_LIMIT} Б. Весь список — `backlog.md`.")
+        # 🔑 Не «усечён», а «свёрнут»: остаток уехал в части и доступен целиком.
+        # Прежняя формулировка отсылала к `backlog.md`, то есть к лишнему раунду —
+        # и задача из хвоста фактически была невидима сессии.
+        out.append(f"ℹ️ в ядре показаны {limit_used} свежих задач «в работе» — "
+                   f"ядро иначе не проходит потолок вывода {HARNESS_LIMIT} Б. "
+                   f"Остальные не потеряны: полный список {hint or '— `backlog.md`'}.")
         out.append("")
     if args.part:
         out.append(f"## Остальные части — вызывать одним блоком")
         if total > 1:
-            mem_last = 1 + len(mem_chunks)
+            if task_chunks:
+                out.append(f"- `--part {task_first}`…`--part {mem_first - 1}` — **полный список "
+                           f"открытых задач** ({len(task_chunks)} шт.), он не усечён")
             if mem_chunks:
-                out.append(f"- `--part 2`…`--part {mem_last}` — **MEMORY.md** целиком"
-                           f" ({len(mem_chunks)} шт.), отдельно его читать не нужно")
+                out.append(f"- `--part {mem_first}`…`--part {diary_first - 1}` — **MEMORY.md** "
+                           f"целиком ({len(mem_chunks)} шт.), отдельно его читать не нужно")
             if chunks:
-                out.append(f"- `--part {mem_last + 1}`…`--part {total}` — сводки дневников"
+                out.append(f"- `--part {diary_first}`…`--part {total}` — сводки дневников"
                            f" за {days} дн. ({len(entries)} файлов, режим `{args.diary}`)")
             out.append(f"- всего частей **{total}** — это один раунд, если отправить их вместе")
         else:
             out.append("- больше частей нет")
         out.append("")
     else:
+        # Запуск руками в терминале: части не нарезаются, поэтому печатаем всё подряд
+        full = task_entries(root)
+        if full:
+            out.append("## Полный список открытых задач")
+            out.append("")
+            out += [text for _, text in full]
         out.append(f"## Дневники за {days} дн. — {len(entries)} файлов, режим `{args.diary}`")
         out.append("")
         out += [text for _, text in entries] or ["- записей нет", ""]

@@ -34,6 +34,11 @@ REQUIRED = ("title", "created", "updated", "status")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
+# Имя файла-промпта, по которому задача продолжается в новой сессии. Канон один,
+# но прежние имена распознаём тоже: они уже лежат в задачах, и потерять их нельзя.
+PROMPT_CANON = "prompt-next-session.md"
+PROMPT_RE = re.compile(r"(?i)prompt")
+
 BACKLOG_SKELETON = f"""# Бэклог
 
 > Представление задач из `tasks/*/task.md`. Правится задача, а не этот файл:
@@ -124,6 +129,83 @@ def collect(tasks_dir: Path):
     return rows, complaints
 
 
+def prompt_of(tasks_dir: Path, rel: str):
+    """Файл-промпт задачи: (имя, дата правки) либо None.
+
+    🔑 Это точка входа в незакрытую задачу: с ним «продолжаем X» решается одним
+    чтением, без него — гаданием по заголовкам. Канон — `prompt-next-session.md`,
+    но задачи с прежними именами (`next-session-prompt.md`, `prompt-<дата>.md`)
+    уже существуют ⟹ ищем по вхождению `prompt`, иначе они молча пропадут из вида.
+    """
+    folder = tasks_dir / rel
+    if not folder.is_dir():
+        return None
+    canon = folder / PROMPT_CANON
+    found = canon if canon.is_file() else next(
+        (p for p in sorted(folder.glob("*.md")) if PROMPT_RE.search(p.name)), None)
+    if not found:
+        return None
+    from datetime import datetime
+    return (found.name, datetime.fromtimestamp(found.stat().st_mtime).strftime("%Y-%m-%d"))
+
+
+def epics(rows, complaints):
+    """{rel зонтика: [подзадачи]} + жалобы на битые ссылки `epic`.
+
+    Ссылка пишется коротким именем папки (`epic: perehod-na-platformu-edo`), без
+    месяца: месяц зонтика знать не нужно, а имена папок по парку уникальны.
+    Отдельного поля «я зонтик» нет намеренно — зонтик тот, на кого сослались.
+    """
+    by_slug = {}
+    for rel, _fm in rows:
+        by_slug.setdefault(rel.split("/")[-1], []).append(rel)
+
+    index, fm_of = {}, dict(rows)
+    for rel, fm in rows:
+        ref = (fm.get("epic") or "").strip().strip("/")
+        if not ref:
+            continue
+        ref = ref.split("/")[-1]
+        targets = by_slug.get(ref, [])
+        if not targets:
+            complaints.append(f"tasks/{rel}/task.md: epic `{ref}` — такой задачи нет")
+            continue
+        if len(targets) > 1:
+            complaints.append(
+                f"tasks/{rel}/task.md: epic `{ref}` неоднозначен: {', '.join(targets)}")
+            continue
+        target = targets[0]
+        if target == rel:
+            complaints.append(f"tasks/{rel}/task.md: epic ссылается на саму задачу")
+            continue
+        # Один уровень намеренно: дерево тем даёт ту же навигацию, но требует обхода
+        # и порождает циклы, а чинить их будет человек посреди рабочей задачи.
+        if (fm_of.get(target, {}).get("epic") or "").strip():
+            complaints.append(
+                f"tasks/{rel}/task.md: epic `{ref}` сам входит в тему — вложенность в один уровень")
+            continue
+        index.setdefault(target, []).append((rel, fm))
+
+    for target, kids in index.items():
+        open_kids = [k for k, f in kids if f.get("status") != "done"]
+        if fm_of.get(target, {}).get("status") == "done" and open_kids:
+            complaints.append(
+                f"tasks/{target}/task.md: тема закрыта, а подзадач открыто {len(open_kids)}")
+    return index
+
+
+def epic_line(rel, fm, kids, tasks_dir: Path) -> str:
+    """Строка темы: счётчики по статусам подзадач + признак промпта."""
+    n = lambda s: sum(1 for _, f in kids if f.get("status") == s)  # noqa: E731
+    parts = [f"{n('in-progress')} в работе", f"{n('waiting')} ждут",
+             f"{n('new')} новых", f"{n('done')} закрыто"]
+    counts = ", ".join(p for p in parts if not p.startswith("0 "))
+    pr = prompt_of(tasks_dir, rel)
+    tail = f" · 📝 промпт {pr[1]}" if pr else ""
+    return (f"- [{md_cell(fm.get('title', rel))}](tasks/{rel}/) — "
+            f"{len(kids)} подзадач: {counts or 'нет открытых'}{tail}")
+
+
 def order(rows):
     """Свежие сверху, при равной дате — по названию."""
     return sorted(rows, key=lambda r: (r[1].get("updated", ""), r[1].get("title", "")),
@@ -161,8 +243,14 @@ ARCHIVE_COLUMNS = [
 ]
 
 
-def render_backlog(rows) -> str:
-    """Незакрытые задачи: в работе → квадранты Эйзенхауэра → ожидание."""
+def render_backlog(rows, index=None, tasks_dir: Path = None) -> str:
+    """Незакрытые задачи: темы → в работе → квадранты Эйзенхауэра → ожидание.
+
+    ⚠️ Подзадачи темы остаются и в своих секциях: раздел тем — оглавление, а не
+    отдельное хранилище. Убрать их оттуда значило бы спрятать задачу от того, кто
+    читает бэклог по срочности, а не по теме.
+    """
+    index = index or {}
     active = [r for r in rows if r[1].get("status") != "done"]
     working = [r for r in active if r[1].get("status") == "in-progress"]
     waiting = [r for r in active if r[1].get("status") == "waiting"]
@@ -188,12 +276,34 @@ def render_backlog(rows) -> str:
         f"ждут {len(waiting)}, прочих {len(rest)}."
     )
     out.append("")
+
+    fm_of = dict(rows)
+    live = {rel: kids for rel, kids in index.items()
+            if fm_of.get(rel, {}).get("status") != "done"
+            or any(f.get("status") != "done" for _, f in kids)}
+    if live:
+        out.append(f"## ☂ Темы ({len(live)})")
+        out.append("")
+        out.append("Точка входа в длинную работу: читать промпт темы, а не выбирать "
+                   "подзадачу по заголовку.")
+        out.append("")
+        for rel in sorted(live, key=lambda r: fm_of.get(r, {}).get("updated", ""),
+                          reverse=True):
+            out.append(epic_line(rel, fm_of.get(rel, {}), live[rel], tasks_dir))
+        out.append("")
+
+    # колонка темы появляется, только когда темы заведены — иначе лишний столбец «—»
+    of_epic = {kid: rel for rel, kids in index.items() for kid, _ in kids}
+    columns = BACKLOG_COLUMNS if not index else BACKLOG_COLUMNS[:1] + [
+        ("тема", lambda s, fm, _m=of_epic: f"`{_m[s].split('/')[-1]}`" if s in _m else "—")
+    ] + BACKLOG_COLUMNS[1:]
+
     for title, section in sections:
         if not section:
             continue
         out.append(f"## {title} ({len(section)})")
         out.append("")
-        out += table(order(section), BACKLOG_COLUMNS)
+        out += table(order(section), columns)
     if not active:
         out.append("Открытых задач нет.")
         out.append("")
@@ -238,6 +348,7 @@ def main():
         sys.exit(f"нет каталога журнала памяти: {root}")
 
     rows, complaints = collect(root / "tasks")
+    index = epics(rows, complaints)
     changed, legacy = [], []
 
     def build(name, begin, end, body, skeleton):
@@ -250,7 +361,8 @@ def main():
         if splice(path, begin, end, body, args.apply, skeleton):
             changed.append(path)
 
-    build("backlog.md", BACKLOG_BEGIN, BACKLOG_END, render_backlog(rows), BACKLOG_SKELETON)
+    build("backlog.md", BACKLOG_BEGIN, BACKLOG_END,
+          render_backlog(rows, index, root / "tasks"), BACKLOG_SKELETON)
     build("archive.md", ARCHIVE_BEGIN, ARCHIVE_END, render_archive(rows), ARCHIVE_SKELETON)
 
     # Память ещё не переведена на задачи-папки: представления не собираем и не ругаемся

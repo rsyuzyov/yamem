@@ -14,9 +14,12 @@
                     (режим для прогона на копии памяти)
     --prune         снести записи неактивных сессий сразу (порог 6 ч вместо 26);
                     брошенное старше 26 ч часть 1 снимает и без этого ключа
-    --part K        печатать часть дайджеста: 1 = ядро (синхронизация, соседи,
-                    задачи, банки, коммиты), 2..N = куски сводок дневников.
+    --part K        печатать часть дайджеста: 1 = ядро (синхронизация, активные
+                    соседи строкой, горящее по задачам, раскладка частей),
+                    2..N = обстановка, полный список задач, MEMORY.md, дневники.
                     Без ключа печатается всё одним выводом.
+                    🔑 Ядро держим маленьким: это единственная часть, которую
+                    нельзя нарезать. Списки в нём не живут — они пухнут.
     --part-limit N  потолок части в БАЙТАХ utf-8 (по умолчанию 20000)
 
 Печатает markdown в stdout. Задачи и дневники не пересказываются целиком:
@@ -199,7 +202,7 @@ def ago(now, when) -> str:
 
 
 def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
-             out: list, log: list) -> set:
+             out: list, log: list, mark: bool = True, quiet: bool = False) -> set:
     """Отметиться на доске, показать соседей С РЕЗУЛЬТАТОМ и снять брошенное.
 
     Возвращает sid'ы, чьи коммиты уже показаны здесь, — чтобы блок коммитов
@@ -216,9 +219,10 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         m = re.search(r"^started:\s*(.+)$", mine.read_text(encoding="utf-8"), re.M)
         if m:
             started = m.group(1).strip()
-    mine.write_text(
-        f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\nhosts: —\n",
-        encoding="utf-8", newline="\n")
+    if mark:
+        mine.write_text(
+            f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\nhosts: —\n",
+            encoding="utf-8", newline="\n")
 
     notes = []  # служебные строки печатаются в конце блока, а не между блоками
     # результат сессии = её коммиты в память; служебные отметки в счёт не идут
@@ -273,7 +277,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     # ⚠️ `--no-sync` глушит и запись отметки в git: копия памяти для проверок несёт
     # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
     # репозиторий (было 2026-08-16). По той же причине на копии ничего не сносим.
-    if is_git(root) and not no_sync:
+    if mark and is_git(root) and not no_sync:
         t0 = time.monotonic()
         paths = [f".sessions/{sid}.md"]
         for name in removed:
@@ -296,7 +300,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
             except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
                 notes.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
             TIMING["mark"] = time.monotonic() - t0
-    elif removed:  # git выключен — файлы не трогаем, но молчать об этом нельзя
+    elif mark and removed:  # git выключен — файлы не трогаем, но молчать об этом нельзя
         notes.append(f"- к снятию брошенных: {len(removed)} — не сняты, git выключен "
                      f"(`--no-sync`)")
         removed = []
@@ -304,6 +308,19 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     live = [r for r in rows if r["live"]]
     past = [r for r in rows
             if not r["live"] and now - r["last"] < timedelta(hours=SESSION_SHOW_HOURS)]
+    if quiet:
+        # ⚠️ Активных соседей называем прямо в ядре, одной строкой: это единственное
+        # из блока, что меняет решение «брать ли задачу», а не описывает прошедший день.
+        names = ", ".join(f"`{r['sid']}` ({r['topic'][:40]})" for r in live) or "нет"
+        out.append(f"## Сессии: {len(rows)} за сутки · активны {len(live)}")
+        out.append(f"- сейчас в работе: {names}")
+        if live:
+            out.append("⚠️ Не бери задачи, которые уже ведёт соседняя сессия.")
+        out += notes
+        out.append(f"- своя отметка записана: `{sid}`")
+        out.append("")
+        return {r["sid"] for r in rows} | {sid}
+
     out.append(f"## Сессии за сутки ({len(rows)} · активны {len(live)})")
     for r in live:
         out.append(f"- 🔵 **{r['sid']}** · {ago(now, r['last'])} · {r['topic'][:120]}")
@@ -316,7 +333,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     else:
         out.append("- активных нет")
     for r in past[:SESSION_SHOW_MAX]:
-        mark = "⚫" if r["file"] is None or r["sid"] in removed else "⚪"
+        badge = "⚫" if r["file"] is None or r["sid"] in removed else "⚪"
         tail = (f" ↳ {r['acts'][-1]['subject'][:70]}" if r["acts"]
                 else " ⚠️ **без следа**")
         # ⚠️ Возраст, а не время суток. Строка попадает сюда и сортируется по
@@ -324,18 +341,19 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         # даты. 19.08 так соврали все семь строк разом: отметки были вчерашние и
         # позавчерашние, пять из них показывали время ПОЗЖЕ текущего (20:50 в 12:46),
         # а подпись под списком уверяла, что тему брали сегодня. Один счёт с 🔵.
-        out.append(f"- {mark} {r['sid']} · {ago(now, r['last'])} · "
+        out.append(f"- {badge} {r['sid']} · {ago(now, r['last'])} · "
                    f"{r['topic'][:70]} —{tail}")
     if len(past) > SESSION_SHOW_MAX:
         out.append(f"- …ещё {len(past) - SESSION_SHOW_MAX} сессий за сутки")
     if past:
         out.append("🔁 Темы выше УЖЕ брали за последние сутки; «без следа» = следа "
                    "в памяти нет, а не «не сделано».")
-    if removed:
+    if mark and removed:
         out.append(f"- снято брошенных записей (старше "
                    f"{int(drop_after.total_seconds() // 3600)} ч): {len(removed)}")
     out += notes
-    out.append(f"- своя отметка записана: `{sid}`")
+    if mark:
+        out.append(f"- своя отметка записана: `{sid}`")
     out.append("")
     return {r["sid"] for r in rows} | {sid}
 
@@ -564,11 +582,17 @@ def task_entries(root: Path) -> list:
     return entries
 
 
-def tasks(root: Path, out: list, working_limit=None, part_hint=""):
-    """Горячее — строкой, остальное — счётчиками. Тела задач не читаем.
+def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
+    """Только то, что горит: счётчики, сроки, темы, срочное+важное.
 
-    `working_limit` — сколько задач «в работе» печатать в ЯДРЕ. Остаток не
-    теряется: полный список едет отдельными частями (`part_hint` называет какими).
+    🔑 Списки задач в ядре НЕ печатаем — они едут частями целиком. Ядро обязано
+    оставаться маленьким: это единственная часть, которую нельзя нарезать, и она
+    же растёт сама по себе (сессии за сутки, банки, коммиты). Прежде здесь жили
+    «в работе» и «ожидает» — 30 строк, ~8 КБ из 28 КБ потолка, и ядро подходило
+    к обрезанию вплотную.
+
+    ⚠️ Сокращение здесь больше не равно потере: `part_hint` называет части,
+    в которых лежит полный список.
     """
     rows = read_tasks(root)
 
@@ -602,12 +626,17 @@ def tasks(root: Path, out: list, working_limit=None, part_hint=""):
                        f"- … ещё {len(section) - limit}, весь список — `backlog.md`")
         out.append("")
 
-    block("🔥 Срочно и важно", hot)
+    block("🔥 Срочно и важно", hot, limit=hot_limit)
     deadlines_block([(rel, fm, fm.get("title", rel)) for rel, fm in openable], root, out)
     epics_block(rows, epic_index(rows), root / "tasks", out)
-    block("⏸ Ожидает внешнего действия", waiting)
-    block("🔧 В работе", working, limit=working_limit)
-    block("⚡ Срочно, не важно", urgent_only, limit=5)
+    if part_hint:
+        out.append(f"📋 Списки задач — «в работе» ({len(working)}), «ожидает» ({len(waiting)}), "
+                   f"«важно» ({len(important)}), «идеи» ({len(ideas)}) — целиком {part_hint}.")
+        out.append("")
+    else:
+        block("⏸ Ожидает внешнего действия", waiting)
+        block("🔧 В работе", working)
+        block("⚡ Срочно, не важно", urgent_only, limit=5)
 
 
 def memory_entries(root: Path) -> list:
@@ -818,14 +847,37 @@ def main():
             m = re.search(r"diary_read_days:\s*(\d+)", cfg.read_text(encoding="utf-8"))
             days = int(m.group(1)) if m else 7
 
+    def situation_entries():
+        """Блоки «что вокруг»: доска сессий, банки, коммиты за сутки.
+
+        🔑 Вынесены из ядра замером: на 21.08 они давали 78 % его веса (сессии 34 %,
+        банки 22 %, коммиты 22 %) и растут сами — от числа сессий за день, банков
+        и активности. Ядро от них не должно зависеть: это единственная часть,
+        которую нельзя нарезать. ⚠️ Читаются заново и БЕЗ побочных действий
+        (`mark=False`): отметку на доске ставит только часть 1.
+        """
+        out, log = [], recent_commits(root)
+        seen = sessions(root, args.sid, args.topic, args.prune, args.no_sync,
+                        out, log, mark=False)
+        items = [("сессии", "\n".join(out))]
+        out = []
+        banks(mem, out)
+        items.append(("банки", "\n".join(out)))
+        out = []
+        commits(root, out, log, seen)
+        items.append(("коммиты", "\n".join(out)))
+        return items
+
     entries = diary_entries(root, days, args.diary)
+    sit_chunks = split_entries(situation_entries(), args.part_limit) if args.part else []
     task_chunks = split_entries(task_entries(root), args.part_limit) if args.part else []
     mem_chunks = split_entries(memory_entries(root), args.part_limit) if args.part else []
     chunks = split_entries(entries, args.part_limit) if args.part else []
-    # ядро + полный список задач + MEMORY.md + дневники
-    total = 1 + len(task_chunks) + len(mem_chunks) + len(chunks)
+    # ядро + обстановка + полный список задач + MEMORY.md + дневники
+    total = 1 + len(sit_chunks) + len(task_chunks) + len(mem_chunks) + len(chunks)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    task_first = 2
+    sit_first = 2
+    task_first = sit_first + len(sit_chunks)
     mem_first = task_first + len(task_chunks)
     diary_first = mem_first + len(mem_chunks)
 
@@ -834,7 +886,14 @@ def main():
     # репозитории дерутся за индекс. Остальные части — чистое чтение.
     if args.part >= 2:
         idx = args.part - 2
-        if idx < len(task_chunks):  # задачи → MEMORY.md → дневники
+        if idx < len(sit_chunks):  # обстановка → задачи → MEMORY.md → дневники
+            out = [f"# yamem preflight — часть {args.part}/{total}: обстановка", ""]
+            out += [text for _, text in sit_chunks[idx]]
+            out.append(f"— конец части {args.part}/{total} —")
+            print("\n".join(out))
+            return
+        idx -= len(sit_chunks)
+        if idx < len(task_chunks):
             piece = task_chunks[idx]
             out = [f"# yamem preflight — часть {args.part}/{total}: задачи", ""]
             out.append(f"## Полный список открытых задач (кусок {idx + 1} из {len(task_chunks)})")
@@ -877,19 +936,24 @@ def main():
             + (f" — часть 1/{total}" if args.part else ""), ""]
     sync(mem, args.no_sync, head)
     log = recent_commits(root)
-    shown = sessions(root, args.sid, args.topic, args.prune, args.no_sync, head, log)
+    shown = sessions(root, args.sid, args.topic, args.prune, args.no_sync, head, log,
+                     quiet=bool(args.part))
 
     # 🔑 Ядро — единственная часть, которую нельзя нарезать: она растёт вместе
     # со списком задач в работе (42 строки на 17.08) и однажды упрётся в потолок
     # вывода молча. Поэтому подбираем, сколько задач влезает, и говорим об этом.
     hint = (f"— части `--part {task_first}`…`--part {mem_first - 1}`"
             if task_chunks else "")
+    # Последний рубеж: если ядро всё равно не влезает (разрослись банки, сессии,
+    # коммиты) — режем и срочное. Полный список к этому моменту уже в частях,
+    # поэтому резать здесь безопасно, в отличие от прежней схемы.
     out, limit_used = None, None
-    for cand in (None, 30, 20, 12, 6):
+    for cand in (None, 5, 3, 1):
         trial = list(head)
-        tasks(root, trial, working_limit=cand, part_hint=hint)
-        banks(mem, trial)
-        commits(root, trial, log, shown)
+        tasks(root, trial, hot_limit=cand, part_hint=hint)
+        if not args.part:  # без частей резать некуда — печатаем всё подряд
+            banks(mem, trial)
+            commits(root, trial, log, shown)
         out, limit_used = trial, cand
         # ⚠️ Запас на футер (раскладка частей, напоминания, тайминг) — и на рост
         # соседних блоков между прогонами: банки и список сессий пухнут сами.
@@ -898,16 +962,15 @@ def main():
         if not args.part or size("\n".join(trial)) + 2500 <= HARNESS_LIMIT:
             break
     if limit_used is not None:
-        # 🔑 Не «усечён», а «свёрнут»: остаток уехал в части и доступен целиком.
-        # Прежняя формулировка отсылала к `backlog.md`, то есть к лишнему раунду —
-        # и задача из хвоста фактически была невидима сессии.
-        out.append(f"ℹ️ в ядре показаны {limit_used} свежих задач «в работе» — "
-                   f"ядро иначе не проходит потолок вывода {HARNESS_LIMIT} Б. "
-                   f"Остальные не потеряны: полный список {hint or '— `backlog.md`'}.")
+        out.append(f"ℹ️ даже срочное урезано до {limit_used}: ядро иначе не проходит потолок "
+                   f"вывода {HARNESS_LIMIT} Б. Ничего не потеряно — всё {hint}.")
         out.append("")
     if args.part:
         out.append(f"## Остальные части — вызывать одним блоком")
         if total > 1:
+            if sit_chunks:
+                out.append(f"- `--part {sit_first}`…`--part {task_first - 1}` — **обстановка**: "
+                           f"доска сессий с результатами, банки топиков, коммиты за сутки")
             if task_chunks:
                 out.append(f"- `--part {task_first}`…`--part {mem_first - 1}` — **полный список "
                            f"открытых задач** ({len(task_chunks)} шт.), он не усечён")

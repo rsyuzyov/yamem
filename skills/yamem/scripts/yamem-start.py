@@ -44,6 +44,7 @@ from pathlib import Path
 from yamem_common import journal_root, parse_frontmatter, read_config, truthy
 
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SESSION_STALE_HOURS = 6      # позже этого сессия не считается активной
 # 🔑 Два порога вместо одного. Отметка пишется при старте и смене темы, поэтому
 # «6 часов молчания» ещё не значит «сессия ушла»: сессия, работающая восьмой час,
@@ -107,6 +108,46 @@ def within(path: Path, root: Path) -> bool:
         return False
 
 
+def self_update_check(no_sync: bool, out: list):
+    """Отстал ли САМ навык от своего origin. Проверяем, но не обновляем.
+
+    🔑 Пак подключён git-субмодулем и junction'ами, а не маркетплейсом ⟹
+    `claude plugin update` к нему неприменим, обновление — обычный `git pull`.
+    Дату последней проверки хранить негде и не нужно: стартер знает свой путь
+    (`__file__`), а `fetch` идёт в том же параллельном блоке, что и банки.
+
+    ⚠️ Только сообщаем. Тянуть правки навыка ПОСРЕДИ сессии нельзя: SKILL.md уже
+    прочитан, а скрипты сменятся под ногами — часть дайджеста соберётся старым
+    кодом, часть новым. Обновление — отдельным решением, между сессиями.
+    """
+    if no_sync:
+        return
+    repo = Path(__file__).resolve().parent
+    while repo != repo.parent and not (repo / ".git").exists():
+        repo = repo.parent
+    if not (repo / ".git").exists():
+        return
+    if run(["git", "fetch", "-q", "--no-tags"], cwd=repo)[0] != 0:
+        return
+    code, branch, _ = run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=repo)
+    if code != 0 or "/" not in branch:
+        return
+    code, counts, _ = run(["git", "rev-list", "--left-right", "--count",
+                           f"HEAD...{branch}"], cwd=repo)
+    if code != 0 or "\t" not in counts:
+        return
+    ahead, behind = (int(x) for x in counts.split("\t")[:2])
+    if behind:
+        code, subjects, _ = run(["git", "log", "--oneline", "-3", f"HEAD..{branch}"], cwd=repo)
+        out.append(f"- ⚠️ **навык `{repo.name}` отстал на {behind} коммит(ов)** от `{branch}`"
+                   + (f" (и {ahead} своих не запушено)" if ahead else ""))
+        for line in subjects.splitlines()[:3]:
+            out.append(f"  ↳ {line[:100]}")
+        out.append(f"  обновить между сессиями: `git -C {repo} pull --rebase`")
+    elif ahead:
+        out.append(f"- ⚠️ навык `{repo.name}`: {ahead} коммит(ов) не запушено")
+
+
 def sync(mem: Path, no_sync: bool, out: list):
     """git pull --rebase по репозиториям памяти. Ошибка не блокирует старт."""
     cfg = read_config(mem)
@@ -139,20 +180,27 @@ def sync(mem: Path, no_sync: bool, out: list):
     # 🔑 Тянем ВСЕ репозитории разом. Последовательные `git pull` — это чистая
     # сеть, и они складываются: три банка давали ~18 с из 18.5 с всего старта,
     # причём каждый возвращал «уже актуально». Параллельно — по самому долгому.
-    if pullable:
-        t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=len(pullable)) as pool:
-            futures = {name: pool.submit(run, ["git", "pull", "--rebase", "--autostash"], path)
-                       for name, path in pullable}
-            for name, _ in pullable:
-                code, so, se = futures[name].result()
-                if code == 0:
-                    state = ("уже актуально" if "up to date" in so.lower()
-                             else so.splitlines()[-1][:80])
-                    out.append(f"- {name}: synced — {state}")
-                else:
-                    out.append(f"- {name}: ⚠️ NOT synced — {(se or so).splitlines()[0][:100]}")
-        TIMING["pull"] = time.monotonic() - t0
+    # проверка своей версии едет тем же параллельным блоком — раунда не добавляет
+    self_lines = []
+    with ThreadPoolExecutor(max_workers=1) as selfpool:
+        self_future = selfpool.submit(self_update_check, no_sync, self_lines)
+        if pullable:
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=len(pullable)) as pool:
+                futures = {name: pool.submit(run, ["git", "pull", "--rebase", "--autostash"], path)
+                           for name, path in pullable}
+                for name, _ in pullable:
+                    code, so, se = futures[name].result()
+                    if code == 0:
+                        state = ("уже актуально" if "up to date" in so.lower()
+                                 else so.splitlines()[-1][:80])
+                        out.append(f"- {name}: synced — {state}")
+                    else:
+                        out.append(f"- {name}: ⚠️ NOT synced — "
+                                   f"{(se or so).splitlines()[0][:100]}")
+            TIMING["pull"] = time.monotonic() - t0
+        self_future.result()
+    out += self_lines
     if inside:
         out.append(f"- {', '.join(inside)}: в составе репозитория памяти")
     out.append("")
@@ -608,6 +656,26 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
     out.append(f"## Задачи: {len(rows)} (открытых {len(openable)})")
     out.append(f"в работе {len(working)} · ждут {len(waiting)} · срочно+важно {len(hot)} · "
                f"срочно {len(urgent_only)} · важно {len(important)} · идеи {len(ideas)}")
+
+    # 🎯 «В работе 57» — цифра, в которую не верит и сам оператор: столько задач
+    # одновременно не ведут. Значит статус протух, а не работа идёт. Показываем
+    # это счётчиком, иначе протухшее неотличимо от живого и занимает место
+    # в каждом дайджесте до следующей оптимизации памяти.
+    today = datetime.now().date()
+
+    def stale(section, days):
+        n = 0
+        for _rel, fm in section:
+            u = fm.get("updated", "")
+            if DATE_RE.match(u) and (today - datetime.strptime(u, "%Y-%m-%d").date()).days > days:
+                n += 1
+        return n
+
+    st7, st14 = stale(working, 7), stale(working, 14)
+    if st7:
+        out.append(f"⚠️ из «в работе» без движения: **{st7}** больше недели, **{st14}** больше "
+                   f"двух ⟹ статус протух, а не работа идёт. Живых за 3 дня: "
+                   f"{len(working) - stale(working, 3)}.")
     out.append("")
 
     def block(title, section, limit=None):

@@ -734,6 +734,34 @@ def memory_entries(root: Path) -> list:
     return [b for b in blocks if b[1].strip()]
 
 
+# начало нового блока: за продолжение абзаца такую строку принимать нельзя
+NEW_BLOCK = re.compile(r"\s*(?:[-*+]\s|\d+[.)]\s|\||>)")
+WRAP_TAIL = 4  # сколько физических строк абзаца забирать вместе с маркером
+
+
+def wrapped_paragraph(src: list, start: int) -> list:
+    """Строка с маркером плюс продолжение её абзаца — один факт, а не обрывок.
+
+    🔑 Тела дневников свёрстаны по ~100 колонок, и маркер стоит в ПЕРВОЙ физической
+    строке абзаца. Фильтр по одной строке отдавал огрызок вида «…вызывающий
+    низкоуровневый метод»: место в сводке занято, а прочитать нечего. Замер 24.08:
+    таких обрывков в недельной сводке была примерно половина всех строк с 🔴.
+
+    ⚠️ Абзац кончается пустой строкой, заголовком или началом нового блока (список,
+    таблица, цитата) — считать их продолжением нельзя, иначе в сводку затягивается
+    соседний пункт целиком.
+    """
+    parts = [src[start].strip()]
+    j = start + 1
+    while j < len(src) and len(parts) < WRAP_TAIL:
+        nxt = src[j]
+        if not nxt.strip() or nxt.startswith("#") or NEW_BLOCK.match(nxt):
+            break
+        parts.append(nxt.strip())
+        j += 1
+    return parts
+
+
 def diary_entries(root: Path, days: int, mode: str) -> list:
     """Сводки дневников по одной записи на файл: [(имя, текст), ...].
 
@@ -757,13 +785,23 @@ def diary_entries(root: Path, days: int, mode: str) -> list:
             body = text.strip()
         else:
             keep = []
-            for line in text.split("\n"):
+            src = text.split("\n")
+            i = 0
+            while i < len(src):
+                line = src[i]
                 if line.startswith("#"):
                     keep.append(line)
-                elif mode == "red" and RED in line:
-                    keep.append(line.strip())
-                elif mode == "marks" and any(m in line for m in MARKS):
-                    keep.append(line.strip())
+                    i += 1
+                    continue
+                hit = (mode == "red" and RED in line) or (
+                    mode == "marks" and any(m in line for m in MARKS)
+                )
+                if not hit:
+                    i += 1
+                    continue
+                para = wrapped_paragraph(src, i)
+                keep.append(" ".join(para))
+                i += len(para)
             body = "\n".join(keep).strip()
         entries.append((f.name, f"### {f.name}\n{body or '_(без заголовков)_'}\n"))
     return entries

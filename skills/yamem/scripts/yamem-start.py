@@ -75,8 +75,33 @@ def run(cmd, cwd=None, timeout=120):
         return 1, "", str(exc)
 
 
-def is_git(path: Path) -> bool:
-    return (path / ".git").exists()
+def git_root(path: Path):
+    """Корень work-tree, которому принадлежит каталог, либо `None`.
+
+    ⚠️ Наличие `.git` рядом — не тот вопрос. У памяти-субмодуля `.git` это
+    файл-gitfile, а у памяти-каталога ВНУТРИ репозитория проекта своего `.git`
+    нет вовсе — хотя git ею управляет ничуть не меньше. Второй случай прежняя
+    проверка считала «git не настроен»: отметка на доске не коммитилась, брошенные
+    записи не снимались никогда и копились месяцами (замер на живой установке —
+    48 записей за шесть дней при показанных «за сутки»). Спрашиваем сам git.
+    """
+    code, so, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if code != 0 or not so:
+        return None
+    return Path(so.strip())
+
+
+def owns_repo(path: Path) -> bool:
+    """Каталог САМ является корнем своего репозитория.
+
+    🔑 Это граница для операций, которые задевают репозиторий ЦЕЛИКОМ — `pull`
+    и `push`. Память-каталог внутри репозитория проекта остаётся пассажиром:
+    старт сессии не вправе тянуть и пушить чужую ветку с чужими коммитами,
+    защитами и CI. Запись своих файлов это не ограничивает — `add` и `commit`
+    идут с pathspec и чужого не задевают.
+    """
+    root = git_root(path)
+    return root is not None and root.resolve() == path.resolve()
 
 
 def attach(path: Path, out: list, name: str) -> None:
@@ -164,10 +189,16 @@ def sync(mem: Path, no_sync: bool, out: list):
         if not path.is_dir():
             out.append(f"- {name}: ⚠️ нет каталога `{path}`")
             continue
-        if not is_git(path):
+        if not owns_repo(path):
             # банк внутри репозитория памяти едет с ним и своего pull не требует
             if path.resolve() != journal.resolve() and within(path, journal):
                 inside.append(name)
+            elif (owner := git_root(path)) is not None:
+                # ⚠️ Каталогом владеет ЧУЖОЙ репозиторий (обычно сам проект).
+                # Коммитить свои файлы там можно — они идут с pathspec, — а `pull`
+                # нельзя: он тянет чужую ветку целиком. Едем пассажиром, но вслух.
+                out.append(f"- {name}: в составе репозитория `{owner.name}` — "
+                           f"pull не наш, коммитим только свои файлы")
             else:
                 out.append(f"- {name}: обычный каталог, git не настроен")
             continue
@@ -325,7 +356,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     # ⚠️ `--no-sync` глушит и запись отметки в git: копия памяти для проверок несёт
     # с собой `.git` с боевым remote, и прогон на ней иначе пушит мусор в боевой
     # репозиторий (было 2026-08-16). По той же причине на копии ничего не сносим.
-    if mark and is_git(root) and not no_sync:
+    if mark and git_root(root) is not None and not no_sync:
         t0 = time.monotonic()
         paths = [f".sessions/{sid}.md"]
         for name in removed:
@@ -341,16 +372,25 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
             # ⏱ push отметки — 5 с сетевого ожидания, которых старт не должен ждать:
             # соседи читают доску не в эту же секунду, а нам она уже записана локально.
             # Отпускаем в фон; провалившийся push всплывёт при следующем pull.
-            try:
-                subprocess.Popen(["git", "push", "-q"], cwd=root,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                notes.append("- отметка закоммичена, push ушёл в фоне")
-            except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
-                notes.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
+            # ⚠️🔑 Но пушим ТОЛЬКО свой репозиторий. Если памятью владеет репозиторий
+            # проекта, `push` отправил бы чужую ветку целиком — вместе с чужими
+            # коммитами, защитами и CI, и делал бы это на каждом старте сессии.
+            if owns_repo(root):
+                try:
+                    subprocess.Popen(["git", "push", "-q"], cwd=root,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    notes.append("- отметка закоммичена, push ушёл в фоне")
+                except Exception as exc:  # noqa: BLE001 — старт не должен падать из-за git
+                    notes.append(f"- ⚠️ отметка закоммичена, но не запушена: {exc}")
+            else:
+                notes.append("- отметка закоммичена; push не наш — памятью владеет "
+                             "репозиторий проекта")
             TIMING["mark"] = time.monotonic() - t0
-    elif mark and removed:  # git выключен — файлы не трогаем, но молчать об этом нельзя
-        notes.append(f"- к снятию брошенных: {len(removed)} — не сняты, git выключен "
-                     f"(`--no-sync`)")
+    elif mark and removed:  # не коммитим — файлы не трогаем, но молчать об этом нельзя
+        # ⚠️ Причину называем настоящую. Раньше здесь всегда стояло «(`--no-sync`)»,
+        # и установка, где флага никто не передавал, читала про него в каждом старте.
+        why = "`--no-sync`" if no_sync else "git не управляет каталогом памяти"
+        notes.append(f"- к снятию брошенных: {len(removed)} — не сняты, {why}")
         removed = []
 
     live = [r for r in rows if r["live"]]

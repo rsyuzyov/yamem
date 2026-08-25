@@ -932,6 +932,30 @@ def banks(mem: Path, out: list):
     out.append("")
 
 
+def memory_age_days(root: Path):
+    """Сколько дней памятью пользуются, по самому раннему файлу дневника.
+
+    Дата стоит в имени (`diary/<месяц>/<дата>.<sid>.md`) ⟹ ни git, ни mtime не нужны:
+    mtime врёт после любого клона, а git стоит вызова. `None` — дневников нет вовсе,
+    памятью ещё не пользовались.
+    """
+    ddir = root / "diary"
+    if not ddir.is_dir():
+        return None
+    best = None
+    for f in ddir.rglob("*.md"):
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", f.name)
+        if not m:
+            continue
+        try:
+            d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except ValueError:
+            continue
+        if best is None or d < best:
+            best = d
+    return None if best is None else (datetime.now().date() - best).days
+
+
 def maintenance(root: Path, mem: Path, out: list, part_mode: bool = False):
     memory_md = root / "MEMORY.md"
     out.append("## Дальше")
@@ -943,20 +967,40 @@ def maintenance(root: Path, mem: Path, out: list, part_mode: bool = False):
             out.append(f"- прочитай `MEMORY.md` ({kb} КБ) — стартер его не пересказывает")
         text = memory_md.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"Последняя оптимизация:\s*(\d{4}-\d{2}-\d{2})", text)
-        if m:
-            last = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-            age = (datetime.now().date() - last).days
+        # ⚠️ Шаблон `MEMORY.md` кладёт сюда тире, а не дату. Прежний regex ждал
+        # только дату ⟹ на свежей установке блок пропускался ЦЕЛИКОМ и оптимизация
+        # не предлагалась никогда — ровно там, где напоминание и нужно. Тире (и любую
+        # другую не-дату) читаем как «не проводилась ни разу».
+        never = None if m else re.search(r"Последняя оптимизация:\s*(\S+)", text)
+        if m or never:
             cfg = (mem / "yamem.config.yaml")
             interval = 7
             if cfg.is_file():
                 mi = re.search(r"interval_days:\s*(\d+)", cfg.read_text(encoding="utf-8"))
                 interval = int(mi.group(1)) if mi else 7
+        if m:
+            last = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            age = (datetime.now().date() - last).days
             if age >= interval:
                 out.append(f"- ⚠️ оптимизация памяти просрочена: последняя {m.group(1)} "
                            f"({age} дн. назад при интервале {interval})")
             else:
                 out.append(f"- оптимизация памяти: последняя {m.group(1)}, "
                            f"следующая через {interval - age} дн.")
+        elif never:
+            # 🔑 Возраст памяти берём по самому раннему дневнику: дата лежит прямо
+            # в имени файла, лишнего вызова не нужно. Пустую память не дёргаем —
+            # в только что развёрнутой оптимизировать нечего.
+            age = memory_age_days(root)
+            if age is None:
+                pass  # памятью ещё не пользовались
+            elif age >= interval:
+                out.append(f"- ⚠️ оптимизация памяти не проводилась ни разу "
+                           f"(в `MEMORY.md` стоит `{never.group(1)}`), а памяти уже "
+                           f"{age} дн. при интервале {interval}")
+            else:
+                out.append(f"- оптимизация памяти ещё не проводилась — памяти "
+                           f"{age} дн. из {interval}")
     out.append("")
 
 

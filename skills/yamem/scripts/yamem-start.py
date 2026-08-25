@@ -75,6 +75,9 @@ def run(cmd, cwd=None, timeout=120):
         return 1, "", str(exc)
 
 
+_GIT_ROOT_CACHE: dict = {}
+
+
 def git_root(path: Path):
     """Корень work-tree, которому принадлежит каталог, либо `None`.
 
@@ -84,11 +87,17 @@ def git_root(path: Path):
     проверка считала «git не настроен»: отметка на доске не коммитилась, брошенные
     записи не снимались никогда и копились месяцами (замер на живой установке —
     48 записей за шесть дней при показанных «за сутки»). Спрашиваем сам git.
+
+    ⏱ Ответ кешируется на прогон: `rev-parse` — это fork, и на Windows девять
+    вызовов стоят 0.42 с (замер 25.08 на памяти с семью банками) против нуля
+    у прежней файловой проверки. Каталоги за один старт не переезжают, а корень
+    памяти спрашивают трижды — кеш снимает повторы даром.
     """
-    code, so, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
-    if code != 0 or not so:
-        return None
-    return Path(so.strip())
+    key = str(path)
+    if key not in _GIT_ROOT_CACHE:
+        code, so, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
+        _GIT_ROOT_CACHE[key] = None if (code != 0 or not so) else Path(so.strip())
+    return _GIT_ROOT_CACHE[key]
 
 
 def owns_repo(path: Path) -> bool:

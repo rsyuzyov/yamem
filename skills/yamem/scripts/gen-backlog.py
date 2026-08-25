@@ -340,6 +340,14 @@ def main():
                     help="ненулевой код, если представление устарело или задачи дефектны")
     args = ap.parse_args()
 
+    # ⚠️🔴 Консоль Windows по умолчанию не UTF-8 (cp1251/cp866), и `print` с «⚠️»
+    # на ней падает с UnicodeEncodeError. Ловушка в том, ЧТО именно печатается:
+    # эмодзи стоит только в строках жалоб ⟹ на чистой памяти проверка проходит
+    # молча и выглядит рабочей, а умирает ровно тогда, когда ей есть что сказать.
+    # Тот же вызов уже стоит в `yamem-start.py`.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     mem = Path(args.memory).resolve()
     if not mem.is_dir():
         sys.exit(f"нет каталога памяти: {mem}")

@@ -33,6 +33,8 @@
 """
 import argparse
 import io
+import json
+import os
 import re
 import subprocess
 import sys
@@ -53,6 +55,50 @@ SESSION_STALE_HOURS = 6      # позже этого сессия не счит�
 # из списка «какие темы сегодня уже брали».
 SESSION_DROP_HOURS = 26      # позже этого запись снимается с доски автоматически
 SESSION_SHOW_HOURS = 24      # окно списка тем за сутки
+
+# 🔑 Доска памяти знает сессии по sid, а человек в интерфейсе видит ИМЯ (`yan-eb`).
+# Связи между ними не было нигде, и «спроси у сессии, которая про X» стоило веерного
+# опроса всех соседей — с прерыванием каждого. Харнес держит реестр живых сессий
+# в `<config>/sessions/<pid>.json`, где есть и `sessionId`, и `name`; отсюда связка
+# берётся даром.
+HARNESS_REGISTRY = "sessions"
+_HARNESS_NAMES = None
+
+
+def harness_names() -> dict:
+    """sid (8 символов) → имя сессии в интерфейсе харнеса.
+
+    Реестр локальный: сессии с других машин сюда не попадают — для них имя
+    берётся из поля `agent:` их собственной отметки на доске.
+    """
+    global _HARNESS_NAMES
+    if _HARNESS_NAMES is not None:
+        return _HARNESS_NAMES
+    _HARNESS_NAMES = {}
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
+    try:
+        files = sorted(Path(base, HARNESS_REGISTRY).glob("*.json"))
+    except OSError:
+        return _HARNESS_NAMES
+    best = {}
+    for f in files:
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue  # реестр чужой и недокументированный — молча пропускаем мусор
+        sid = str(rec.get("sessionId") or "")[:8]
+        name = rec.get("name")
+        if not sid or not name:
+            continue
+        # ⚠️ Имя переиспользуется: харнес отдаёт его новой сессии, когда прежняя
+        # закончилась. Побеждает самая свежая запись, иначе доска покажет имя,
+        # по которому сообщение уедет не туда.
+        started = rec.get("startedAt") or 0
+        if sid not in best or started >= best[sid][0]:
+            best[sid] = (started, str(name))
+    _HARNESS_NAMES = {s: n for s, (_, n) in best.items()}
+    return _HARNESS_NAMES
+
 SESSION_SHOW_MAX = 15
 # связь «коммит памяти → сессия»: дневник называется diary/<месяц>/<дата>.<sid>.md
 DIARY_SID = re.compile(r"diary/[^/]+/\d{4}-\d{2}-\d{2}\.([0-9a-f]{6,12})\.md$")
@@ -289,6 +335,11 @@ def ago(now, when) -> str:
     return f"{mins / 1440:.1f} дн"
 
 
+def aka(row: dict) -> str:
+    """Имя сессии в интерфейсе — в скобках после sid, если оно известно."""
+    return f" (`{row['agent']}`)" if row.get("agent") else ""
+
+
 def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
              out: list, log: list, mark: bool = True, quiet: bool = False) -> set:
     """Отметиться на доске, показать соседей С РЕЗУЛЬТАТОМ и снять брошенное.
@@ -301,6 +352,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     now = datetime.now()
     stamp = now.strftime("%Y-%m-%d %H:%M")
 
+    names = harness_names()
     mine = board / f"{sid}.md"
     started = stamp
     if mine.is_file():
@@ -309,7 +361,8 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
             started = m.group(1).strip()
     if mark:
         mine.write_text(
-            f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\nhosts: —\n",
+            f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\n"
+            f"hosts: —\nagent: {names.get(sid, '—')}\n",
             encoding="utf-8", newline="\n")
 
     notes = []  # служебные строки печатаются в конце блока, а не между блоками
@@ -334,12 +387,15 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
             except ValueError:
                 upd = None
         t = re.search(r"^topic:\s*(.+)$", text, re.M)
+        a = re.search(r"^agent:\s*(.+)$", text, re.M)
+        agent = names.get(f.stem) or (a.group(1).strip() if a else "")
         acts = sorted(by_sid.get(f.stem, []), key=lambda c: c["when"] or now)
         # 🔑 Живость — по ФАКТУ работы, а не только по полю `updated`: коммит
         # с дневником сессии моложе её отметки, а дисциплины он не требует.
         seen = [d for d in [upd] + [c["when"] for c in acts] if d]
         last = max(seen) if seen else datetime.fromtimestamp(f.stat().st_mtime)
         rows.append({"sid": f.stem, "topic": (t.group(1).strip() if t else "—"),
+                     "agent": "" if agent in ("—", "-") else agent,
                      "upd": upd or last, "last": last, "acts": acts, "file": f})
 
     # sid, у которого работа в памяти есть, а запись уже снята (руками или нами
@@ -351,6 +407,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         acts = sorted(acts, key=lambda c: c["when"] or now)
         last = max([c["when"] for c in acts if c["when"]], default=now)
         rows.append({"sid": s, "topic": "— (отметка снята)", "upd": last,
+                     "agent": names.get(s, ""),
                      "last": last, "acts": acts, "file": None})
 
     rows.sort(key=lambda r: r["last"], reverse=True)
@@ -408,9 +465,10 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     if quiet:
         # ⚠️ Активных соседей называем прямо в ядре, одной строкой: это единственное
         # из блока, что меняет решение «брать ли задачу», а не описывает прошедший день.
-        names = ", ".join(f"`{r['sid']}` ({r['topic'][:40]})" for r in live) or "нет"
+        shown_live = ", ".join(
+            f"`{r['sid']}`{aka(r)} ({r['topic'][:40]})" for r in live) or "нет"
         out.append(f"## Сессии: {len(rows)} за сутки · активны {len(live)}")
-        out.append(f"- сейчас в работе: {names}")
+        out.append(f"- сейчас в работе: {shown_live}")
         if live:
             out.append("⚠️ Не бери задачи, которые уже ведёт соседняя сессия.")
         out += notes
@@ -420,7 +478,8 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
 
     out.append(f"## Сессии за сутки ({len(rows)} · активны {len(live)})")
     for r in live:
-        out.append(f"- 🔵 **{r['sid']}** · {ago(now, r['last'])} · {r['topic'][:120]}")
+        out.append(f"- 🔵 **{r['sid']}**{aka(r)} · {ago(now, r['last'])} · "
+                   f"{r['topic'][:120]}")
         for c in reversed(r["acts"][-2:]):
             out.append(f"  ↳ {c['subject'][:100]}")
         if not r["acts"]:
@@ -438,7 +497,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         # даты. 19.08 так соврали все семь строк разом: отметки были вчерашние и
         # позавчерашние, пять из них показывали время ПОЗЖЕ текущего (20:50 в 12:46),
         # а подпись под списком уверяла, что тему брали сегодня. Один счёт с 🔵.
-        out.append(f"- {badge} {r['sid']} · {ago(now, r['last'])} · "
+        out.append(f"- {badge} {r['sid']}{aka(r)} · {ago(now, r['last'])} · "
                    f"{r['topic'][:70]} —{tail}")
     if len(past) > SESSION_SHOW_MAX:
         out.append(f"- …ещё {len(past) - SESSION_SHOW_MAX} сессий за сутки")

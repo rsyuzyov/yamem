@@ -37,6 +37,44 @@ if [ -n "$staged" ] && ! printf '%s\n' "$staged" | grep -qv '\.sessions/'; then
     exit 0
 fi
 
+# ⚠️🔴 ОБЩИЙ ИНДЕКС. Сессии на одной машине работают в ОДНОЙ рабочей копии памяти,
+# и `git commit` без путей забирает индекс ЦЕЛИКОМ — вместе с тем, что застейджила
+# соседняя сессия. 🔑 Правило «`git add` по файлам, а не `-A`» от этого НЕ спасает:
+# аккуратно добавленный файл всё равно уезжает в чужой коммит, если сосед коммитит
+# без pathspec. Прецеденты: 24.08 и 25.08 (топик `workstation` уехал в коммит «ЭДО:
+# карточка показывает все отправки…» — знание не потеряно, но сообщение коммита врёт
+# о содержимом, а найти правку потом можно только полнотекстовым поиском по истории).
+#
+# `git commit -- <пути>` собирается во ВРЕМЕННОМ индексе (`next-index-<pid>`), и чужие
+# staged-файлы в него не попадают — проверено. По нему и отличаем.
+#
+# Требуем pathspec только когда красть есть у кого: живых сессий больше одной.
+# Живость — по свежим (6 ч) отметкам на доске и файлам дневника, sid берём из имени.
+if [ -z "$YAMEM_ALLOW_FULL_INDEX" ] &&
+   ! printf '%s' "$GIT_INDEX_FILE" | grep -q 'next-index'; then
+    gitdir=$(git rev-parse --git-dir 2>/dev/null)
+    inflight=""
+    for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD rebase-merge rebase-apply; do
+        [ -e "$gitdir/$marker" ] && inflight=1
+    done
+    # ⚠️ merge/rebase/cherry-pick/revert pathspec не принимают вовсе — их не трогаем.
+    if [ -z "$inflight" ]; then
+        live=$( { find "$mem/.sessions" -maxdepth 1 -name '*.md' -mmin -360 2>/dev/null \
+                    | sed 's|.*/||; s|\.md$||'
+                  find "$mem/diary" -name '*.*.md' -mmin -360 2>/dev/null \
+                    | sed -n 's|.*\.\([0-9a-f]\{6,\}\)\.md$|\1|p'; } | sort -u | wc -l)
+        if [ "$live" -gt 1 ]; then
+            echo "yamem: в памяти работают $live сессии — коммит без путей заберёт чужое из общего индекса."
+            echo '       Индекс один на всех, и "git add" по файлам от этого не спасает:'
+            echo "       чужой staged-файл уедет в твой коммит, а сообщение будет врать о содержимом."
+            echo "       Коммить с явными путями:"
+            echo "         git commit -m \"…\" -- <файл> [<файл>…]"
+            echo "       Обойти разово: YAMEM_ALLOW_FULL_INDEX=1 git commit …"
+            exit 1
+        fi
+    fi
+fi
+
 # Где генераторы. 🔑 С 2026-08-17 они лежат ВНУТРИ каталога навыка (`skills/yamem/scripts`),
 # чтобы ехать вместе с ним при любом способе подключения; старые пути оставлены как фолбэк.
 scripts=""

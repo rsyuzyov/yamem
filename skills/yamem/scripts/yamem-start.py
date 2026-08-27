@@ -223,13 +223,39 @@ def self_update_check(no_sync: bool, out: list):
                    + (f" (и {ahead} своих не запушено)" if ahead else ""))
         for line in subjects.splitlines()[:3]:
             out.append(f"  ↳ {line[:100]}")
-        out.append(f"  обновить между сессиями: `git -C {repo} pull --rebase`")
+        out.append(f"  обновить между сессиями: `git -C {repo} fetch && git -C {repo} rebase @{{u}}`")
     elif ahead:
         out.append(f"- ⚠️ навык `{repo.name}`: {ahead} коммит(ов) не запушено")
 
 
+def fetch_rebase(path: Path):
+    """Синхронизация без промежуточного `FETCH_HEAD` — вместо `git pull --rebase`.
+
+    🔑 `pull` — это `fetch` + `rebase`, и цель ребейза он передаёт сам себе через
+    файл `.git/FETCH_HEAD`. Файл один на рабочую копию и без блокировки:
+    посторонний `fetch` (autofetch редактора, стартер соседней сессии — `.git`
+    у всех общий) перезаписывает его между нашими fetch и rebase, и `pull` падает
+    `fatal: Cannot rebase onto multiple branches` при совершенно чистом конфиге
+    (прецедент 27.08.2026, память). Ребейзим на remote-tracking ref: чужой fetch
+    его максимум обновит тем же хешем, портить нечего.
+    ⚠️ Ветку берём как `@{u}`, а не по имени: в парке репозиториев вперемешку
+    `main` и `master` — хардкод сломал бы половину.
+    """
+    code, upstream, _ = run(["git", "rev-parse", "--abbrev-ref",
+                             "--symbolic-full-name", "@{u}"], cwd=path)
+    if code != 0:
+        return 1, "", "у текущей ветки нет upstream"
+    code, so, se = run(["git", "fetch", "--quiet"], cwd=path)
+    if code != 0:
+        return code, so, se
+    code, so, se = run(["git", "rebase", "--autostash", upstream], cwd=path)
+    # ⚠️ `rebase` пишет исход в stderr, а не в stdout (в отличие от `pull`),
+    # а вызывающий разбирает именно stdout — склеиваем, иначе там пусто.
+    return code, (so or se or "уже актуально"), se
+
+
 def sync(mem: Path, no_sync: bool, out: list):
-    """git pull --rebase по репозиториям памяти. Ошибка не блокирует старт."""
+    """fetch + rebase по репозиториям памяти. Ошибка не блокирует старт."""
     cfg = read_config(mem)
     journal = cfg["journal"]
     targets = [("память", journal)]
@@ -263,7 +289,7 @@ def sync(mem: Path, no_sync: bool, out: list):
         attach(path, out, name)  # локально и быстро, до параллельной части
         pullable.append((name, path))
 
-    # 🔑 Тянем ВСЕ репозитории разом. Последовательные `git pull` — это чистая
+    # 🔑 Тянем ВСЕ репозитории разом. Последовательные fetch — это чистая
     # сеть, и они складываются: три банка давали ~18 с из 18.5 с всего старта,
     # причём каждый возвращал «уже актуально». Параллельно — по самому долгому.
     # проверка своей версии едет тем же параллельным блоком — раунда не добавляет
@@ -273,13 +299,14 @@ def sync(mem: Path, no_sync: bool, out: list):
         if pullable:
             t0 = time.monotonic()
             with ThreadPoolExecutor(max_workers=len(pullable)) as pool:
-                futures = {name: pool.submit(run, ["git", "pull", "--rebase", "--autostash"], path)
+                futures = {name: pool.submit(fetch_rebase, path)
                            for name, path in pullable}
                 for name, _ in pullable:
                     code, so, se = futures[name].result()
                     if code == 0:
+                        lines = so.splitlines()
                         state = ("уже актуально" if "up to date" in so.lower()
-                                 else so.splitlines()[-1][:80])
+                                 else (lines[-1][:80] if lines else "готово"))
                         out.append(f"- {name}: synced — {state}")
                     else:
                         out.append(f"- {name}: ⚠️ NOT synced — "
@@ -1256,7 +1283,7 @@ def main():
         out.append("")
     maintenance(root, mem, out, part_mode=bool(args.part))
     elapsed = time.monotonic() - TIMING["start"]
-    out.append(f"- ⏱ стартер {elapsed:.1f} с: `git pull` {TIMING['pull']:.1f} с, "
+    out.append(f"- ⏱ стартер {elapsed:.1f} с: синхронизация {TIMING['pull']:.1f} с, "
                f"отметка на доске (commit+push) {TIMING['mark']:.1f} с, "
                f"сборка {elapsed - TIMING['pull'] - TIMING['mark']:.1f} с"
                f"{' — git пропущен (`--no-sync`)' if args.no_sync else ''}")

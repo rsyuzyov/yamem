@@ -16,6 +16,7 @@
     <!-- yamem:archive:begin -->  ...  <!-- yamem:archive:end -->
 """
 import argparse
+import datetime
 import re
 import sys
 from pathlib import Path
@@ -33,6 +34,7 @@ STATUSES = ("new", "in-progress", "waiting", "done")
 REQUIRED = ("title", "created", "updated", "status")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+TODAY = datetime.date.today().isoformat()
 
 # Имя файла-промпта, по которому задача продолжается в новой сессии. Канон один,
 # но прежние имена распознаём тоже: они уже лежат в задачах, и потерять их нельзя.
@@ -65,10 +67,17 @@ def truthy(value: str) -> bool:
 
 
 def collect(tasks_dir: Path):
-    """[(путь от tasks/, поля)] + жалобы. Задача = папка с task.md в каталоге месяца."""
-    rows, complaints = [], []
+    """[(путь от tasks/, поля)] + жалобы + мягкие замечания.
+
+    Жалобы (`complaints`) — дефекты формы, они валят `--check` и держат коммит.
+    Мягкие (`soft`) — подсказки по СОДЕРЖАНИЮ (просроченный срок у незакрытой
+    задачи): печатаются, но кода возврата не портят. Разделение намеренное:
+    pre-commit не должен вставать из-за того, что оператор ещё не решил,
+    закрывать задачу или двигать срок.
+    """
+    rows, complaints, soft = [], [], []
     if not tasks_dir.is_dir():
-        return rows, complaints  # памяти без задач ещё нет — это не дефект
+        return rows, complaints, soft  # памяти без задач ещё нет — это не дефект
 
     def take(folder: Path, rel: str, month: str):
         task_md = folder / "task.md"
@@ -93,11 +102,24 @@ def collect(tasks_dir: Path):
             complaints.append(
                 f"tasks/{rel}/task.md: status `{fm['status']}` вне набора {'/'.join(STATUSES)}"
             )
-        for key in ("created", "updated"):
+        for key in ("created", "updated", "deadline"):
             if fm.get(key) and not DATE_RE.match(fm[key]):
                 complaints.append(
                     f"tasks/{rel}/task.md: {key} `{fm[key]}` не в формате YYYY-MM-DD"
                 )
+        # 🎯 Просроченный срок у незакрытой задачи — почти всегда не «горит»,
+        # а «работа сделана, а снять срок забыли»: замер 03.09.2026 показал, что
+        # закрытия идут пачками на ревизиях, а между ними просроченное копится
+        # и каждое утро подаётся как срочное. Это ЖАЛОБА, а не ошибка: коммит
+        # не останавливаем — решить, закрыть задачу или сдвинуть срок, может
+        # только человек с фактом на руках.
+        deadline = fm.get("deadline", "")
+        if (DATE_RE.match(deadline) and fm.get("status") != "done"
+                and deadline < TODAY):
+            soft.append(
+                f"tasks/{rel}/task.md: срок {deadline} прошёл, а status "
+                f"`{fm.get('status')}` ⟹ закрыть задачу либо сдвинуть `deadline:`"
+            )
         created, updated = fm.get("created", ""), fm.get("updated", "")
         if DATE_RE.match(created) and DATE_RE.match(updated) and updated < created:
             complaints.append(
@@ -126,7 +148,7 @@ def collect(tasks_dir: Path):
                     take(folder, f"{entry.name}/{folder.name}", entry.name)
             continue
         take(entry, entry.name, "")  # задача в корне tasks/ — старая раскладка
-    return rows, complaints
+    return rows, complaints, soft
 
 
 def prompt_of(tasks_dir: Path, rel: str):
@@ -355,7 +377,7 @@ def main():
     if not root.is_dir():
         sys.exit(f"нет каталога журнала памяти: {root}")
 
-    rows, complaints = collect(root / "tasks")
+    rows, complaints, soft = collect(root / "tasks")
     index = epics(rows, complaints)
     changed, legacy = [], []
 
@@ -384,6 +406,14 @@ def main():
     print(f"задач: {len(rows)} (открытых {len(rows) - done}, завершённых {done})")
     for c in complaints:
         print("  ⚠️", c)
+    # ⚠️ Мягкие замечания печатаем ПОСЛЕ жалоб и отдельным заголовком: их адресат —
+    # человек, решающий судьбу задачи, а не автор коммита.
+    if soft:
+        print(f"  🔚 задач с прошедшим сроком: {len(soft)} — закрыть или сдвинуть срок:")
+        for s in soft[:10]:
+            print("     ", s)
+        if len(soft) > 10:
+            print(f"      … ещё {len(soft) - 10}")
     for p in changed:
         print(("обновлён: " if args.apply else "изменится: ") + str(p))
     if not changed:

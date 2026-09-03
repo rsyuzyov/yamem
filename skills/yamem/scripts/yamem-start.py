@@ -582,13 +582,29 @@ def dates_in(line: str, today):
     return found
 
 
-def deadline_of(path: Path, today, title: str = ""):
-    """Ближайший срок задачи: (дата, контекст) либо None.
+def deadline_of(path: Path, today, title: str = "", fm: dict | None = None):
+    """Ближайший срок задачи: (дата, контекст, источник) либо None.
 
-    Ищем в заголовке и в теле. Дата считается сроком, только если стоит рядом
-    с маркером срока (`DEADLINE_NEAR` символов) — иначе это дата постановки,
-    прецедента или решения, и её нельзя показывать как дедлайн.
+    🔑 Приоритет — ПОЛЕ `deadline` фронтматтера. Оно введено 03.09.2026 потому,
+    что срок, живущий текстом в теле, не имеет состояния: работа сделана, а строка
+    «истекает 02.09» осталась — и дайджест каждое утро подаёт закрытое как горящее.
+    У поля состояние есть: снять срок = убрать поле, и это видно в diff.
+
+    Фолбэк — прежний разбор тела: маркер срока (`DEADLINE_HINT`) плюс дата рядом
+    (`DEADLINE_NEAR` символов), иначе это дата постановки или прецедента.
+    Источник возвращаем, чтобы дайджест мог отличить «срок объявлен» от
+    «срок выловлен из текста и, возможно, протух».
     """
+    fm = fm or {}
+    raw = str(fm.get("deadline", "")).strip()
+    if raw:
+        m = ISO_DATE.match(raw) or ISO_DATE.search(raw)
+        if m:
+            try:
+                d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+                return (d, str(fm.get("deadline_why", "")).strip(), "field")
+            except ValueError:
+                pass
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -609,7 +625,8 @@ def deadline_of(path: Path, today, title: str = ""):
             if best is None or d < best[0]:
                 # контекст — окно вокруг самой даты, а не начало строки
                 lo, hi = max(0, pos - 70), min(len(s), pos + 70)
-                best = (d, ("…" if lo else "") + s[lo:hi] + ("…" if hi < len(s) else ""))
+                best = (d, ("…" if lo else "") + s[lo:hi] + ("…" if hi < len(s) else ""),
+                        "body")
     return best
 
 
@@ -617,25 +634,82 @@ def deadlines_block(rows: list, root: Path, out: list, horizon: int = 45, limit:
     """Задачи со сроком: просроченные и ближайшие. Строкой, с датой и контекстом."""
     today = datetime.now().date()
     found = []
-    for rel, _fm, title in rows:
-        d = deadline_of(root / "tasks" / rel / "task.md", today, title)
+    for rel, fm, title in rows:
+        d = deadline_of(root / "tasks" / rel / "task.md", today, title, fm)
         if d and (d[0] - today).days <= horizon:
-            found.append((d[0], rel, title, d[1]))
+            found.append((d[0], rel, title, d[1], d[2]))
     if not found:
         return
     found.sort()
-    out.append(f"**⏰ Со сроком в теле задачи** ({len(found)})")
-    for date, rel, title, ctx in found[:limit]:
+    from_body = sum(1 for f in found if f[4] == "body")
+    out.append(f"**⏰ Со сроком** ({len(found)})")
+    for date, rel, title, ctx, src in found[:limit]:
         left = (date - today).days
         mark = "🔴 ПРОСРОЧЕН" if left < 0 else ("🟠" if left <= 7 else "🟡")
         when = f"{-left} дн. назад" if left < 0 else (f"через {left} дн." if left else "сегодня")
-        out.append(f"- {mark} {date:%d.%m} ({when}) — {title} — `tasks/{rel}/`")
+        tail = "" if src == "field" else " ⚠️ из тела"
+        out.append(f"- {mark} {date:%d.%m} ({when}) — {title} — `tasks/{rel}/`{tail}")
         # контекст не печатаем, если срок и так виден в заголовке
-        plain = ctx.strip("…").strip()
-        if plain[:60] not in title:
+        plain = (ctx or "").strip("…").strip()
+        if plain and plain[:60] not in title:
             out.append(f"  ↳ {plain[:150]}")
     if len(found) > limit:
         out.append(f"- … ещё {len(found) - limit} со сроком в пределах {horizon} дн.")
+    if from_body:
+        out.append(f"⚠️ у {from_body} срок выловлен ИЗ ТЕЛА, а не объявлен полем `deadline:` "
+                   f"⟹ он мог протухнуть вместе с работой. Подтвердил факт — перенеси срок "
+                   f"в поле либо сними его вместе с задачей.")
+    out.append("")
+
+
+def closing_candidates_block(rows: list, root: Path, out: list, limit: int = 8,
+                             stale_days: int = 14):
+    """Задачи, которые пора закрыть или подтвердить. Спрашиваем — сами знать не можем.
+
+    🎯 Мотив (разбор 03.09.2026): закрытия шли ПАЧКАМИ на ревизиях — 38 задач
+    28.08, 21 — 01.09, 21 — 17.08 — а не по ходу работы. Причина не в
+    невнимательности: сессия, которая доделала работу, часто заканчивается
+    переключением оператора, а часть работы вообще делает человек вне сессии
+    (продлил учётку, заменил сертификат) — этого yamem узнать не может НИКАК.
+    ⟹ единственный работающий ход — не «догадаться», а спросить, и спрашивать
+    там, где оператор и так читает: в ядре дайджеста, коротким списком.
+
+    Три признака, все — «работа могла закончиться, а статус остался»:
+      • срок прошёл, а задача не закрыта;
+      • `waiting` без движения дольше `stale_days` — ждали внешнего, оно
+        могло уже случиться;
+      • `in-progress` без движения дольше `stale_days` — статус протух.
+    """
+    today = datetime.now().date()
+
+    def age(fm):
+        u = fm.get("updated", "")
+        if DATE_RE.match(u):
+            return (today - datetime.strptime(u, "%Y-%m-%d").date()).days
+        return None
+
+    cands = []
+    for rel, fm, title in rows:
+        status = fm.get("status")
+        a = age(fm)
+        d = deadline_of(root / "tasks" / rel / "task.md", today, title, fm)
+        if d and (d[0] - today).days < 0:
+            cands.append((0, f"срок прошёл {d[0]:%d.%m}", rel, title))
+        elif status == "waiting" and a is not None and a >= stale_days:
+            cands.append((1, f"ждёт {a} дн. без движения", rel, title))
+        elif status == "in-progress" and a is not None and a >= stale_days:
+            cands.append((2, f"в работе {a} дн. без движения", rel, title))
+    if not cands:
+        return
+    cands.sort(key=lambda c: (c[0], c[2]))
+    out.append(f"**🔚 Кандидаты на закрытие** ({len(cands)}) — подтверди или продли")
+    for _rank, why, rel, title in cands[:limit]:
+        out.append(f"- {why} — {title} — `tasks/{rel}/`")
+    if len(cands) > limit:
+        out.append(f"- … ещё {len(cands) - limit}")
+    out.append("↳ ⚠️ Проверять ФАКТОМ, а не по тексту задачи: часть работы делается "
+               "мимо сессий. Подтвердилось — `status: done`; нет — сдвинуть `deadline:` "
+               "и написать в теле, чего ждём.")
     out.append("")
 
 
@@ -830,7 +904,9 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
         out.append("")
 
     block("🔥 Срочно и важно", hot, limit=hot_limit)
-    deadlines_block([(rel, fm, fm.get("title", rel)) for rel, fm in openable], root, out)
+    named = [(rel, fm, fm.get("title", rel)) for rel, fm in openable]
+    deadlines_block(named, root, out)
+    closing_candidates_block(named, root, out)
     epics_block(rows, epic_index(rows), root / "tasks", out)
     if part_hint:
         out.append(f"📋 Списки задач — «в работе» ({len(working)}), «ожидает» ({len(waiting)}), "

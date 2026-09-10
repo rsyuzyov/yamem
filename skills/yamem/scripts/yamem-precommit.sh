@@ -123,7 +123,7 @@ PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-backlog.py" --memory "$mem" --che
 PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-topics-index.py" --memory "$mem" --check || rc=1
 
 # ⚠️🔴 Управляющие символы в тексте — почти всегда путь Windows, съеденный оболочкой при
-# записи (`C:cv8` -> `C:` + 0x01 + `cv8`, `C:	emp` -> `C:` + табуляция + `emp`).
+# записи (`C:\1cv8` -> `C:` + 0x01 + `cv8`, `C:\temp` -> `C:` + табуляция + `emp`).
 # В markdown это НЕ видно: путь читается как правильный, но он нерабочий. Прецеденты:
 # 50 мест в 26 файлах (02.09.2026) и ещё 18 путей с табуляцией (10.09.2026).
 if [ -f "$scripts/check-control-chars.py" ]; then

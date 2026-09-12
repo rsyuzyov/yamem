@@ -363,8 +363,24 @@ def ago(now, when) -> str:
 
 
 def aka(row: dict) -> str:
-    """Имя сессии в интерфейсе — в скобках после sid, если оно известно."""
-    return f" (`{row['agent']}`)" if row.get("agent") else ""
+    """Имя сессии в интерфейсе — в скобках после sid, если оно известно.
+
+    🔑 Имя печатается как АДРЕС для сообщения, поэтому оно обязано быть либо
+    проверенным, либо явно помеченным. Три случая:
+      - имя разрешилось в реестре живых сессий харнеса → `name` без пометки;
+      - имя только из отметки на доске (чужая машина, реестр её не знает) →
+        `name?` — адрес не проверен;
+      - сессия уже закрыта → `name, закрыта` — как адрес бессмысленно.
+    ⚠️ Само по себе имя протухает всегда; ловушка не в этом, а в том, что
+    протухшее имя было неотличимо от живого (прецедент 29.08: разбор уехал
+    сессии, которая вторые сутки занималась другим).
+    """
+    name = row.get("agent")
+    if not name:
+        return ""
+    if not row.get("live", True):
+        return f" (`{name}`, закрыта)"
+    return f" (`{name}`)" if row.get("agent_ok") else f" (`{name}`?)"
 
 
 def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
@@ -416,6 +432,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         t = re.search(r"^topic:\s*(.+)$", text, re.M)
         a = re.search(r"^agent:\s*(.+)$", text, re.M)
         agent = names.get(f.stem) or (a.group(1).strip() if a else "")
+        agent_ok = f.stem in names  # разрешилось реестром харнеса, а не отметкой
         acts = sorted(by_sid.get(f.stem, []), key=lambda c: c["when"] or now)
         # 🔑 Живость — по ФАКТУ работы, а не только по полю `updated`: коммит
         # с дневником сессии моложе её отметки, а дисциплины он не требует.
@@ -423,6 +440,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         last = max(seen) if seen else datetime.fromtimestamp(f.stat().st_mtime)
         rows.append({"sid": f.stem, "topic": (t.group(1).strip() if t else "—"),
                      "agent": "" if agent in ("—", "-") else agent,
+                     "agent_ok": agent_ok,
                      "upd": upd or last, "last": last, "acts": acts, "file": f})
 
     # sid, у которого работа в памяти есть, а запись уже снята (руками или нами
@@ -434,7 +452,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         acts = sorted(acts, key=lambda c: c["when"] or now)
         last = max([c["when"] for c in acts if c["when"]], default=now)
         rows.append({"sid": s, "topic": "— (отметка снята)", "upd": last,
-                     "agent": names.get(s, ""),
+                     "agent": names.get(s, ""), "agent_ok": s in names,
                      "last": last, "acts": acts, "file": None})
 
     rows.sort(key=lambda r: r["last"], reverse=True)
@@ -498,6 +516,9 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         out.append(f"- сейчас в работе: {shown_live}")
         if live:
             out.append("⚠️ Не бери задачи, которые уже ведёт соседняя сессия.")
+            if any(r["agent"] and not r["agent_ok"] for r in live):
+                out.append("⚠️ Имя с `?` взято из отметки и реестром не проверено — "
+                           "адрес для сообщения брать из `ListAgents`.")
         out += notes
         out.append(f"- своя отметка записана: `{sid}`")
         out.append("")
@@ -513,6 +534,9 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
             out.append("  ↳ ⚠️ в памяти пока ничего не оставила")
     if live:
         out.append("⚠️ Не бери задачи, которые уже ведёт соседняя сессия.")
+        if any(r["agent"] and not r["agent_ok"] for r in live):
+            out.append("⚠️ Имя с `?` взято из отметки и реестром не проверено — "
+                       "адрес для сообщения брать из `ListAgents`.")
     else:
         out.append("- активных нет")
     for r in past[:SESSION_SHOW_MAX]:

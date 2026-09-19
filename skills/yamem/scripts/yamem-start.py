@@ -63,6 +63,16 @@ SESSION_SHOW_HOURS = 24      # окно списка тем за сутки
 # берётся даром.
 HARNESS_REGISTRY = "sessions"
 _HARNESS_NAMES = None
+# sid → момент последнего обновления записи реестра (`updatedAt`) и полный sessionId.
+# 🔑 Живость по отметке и коммитам в память не видит сессию, которая сутки работает
+# над одной темой и в память не пишет: прецедент 18.09.2026 — «Onesible  поток A»
+# (45fdb105) работала до 21:38, последний её коммит в память был 17.09 в 09:58,
+# и в 21:55 сосед снял её как брошенную. Харнес же обновляет `updatedAt` на каждой
+# смене статуса живой сессии — это факт работы, не требующий никакой дисциплины.
+_HARNESS_SEEN: dict = {}
+_HARNESS_FULL: dict = {}
+_TITLES: dict = {}
+TITLE_TAIL = 256 * 1024  # заголовок харнес дописывает регулярно — хватает хвоста
 
 
 def harness_names() -> dict:
@@ -96,8 +106,53 @@ def harness_names() -> dict:
         started = rec.get("startedAt") or 0
         if sid not in best or started >= best[sid][0]:
             best[sid] = (started, str(name))
+            _HARNESS_FULL[sid] = str(rec.get("sessionId"))
+        upd = rec.get("updatedAt")
+        if isinstance(upd, (int, float)) and upd > 0:
+            try:
+                when = datetime.fromtimestamp(upd / 1000)
+            except (OverflowError, OSError, ValueError):
+                when = None
+            if when and (sid not in _HARNESS_SEEN or when > _HARNESS_SEEN[sid]):
+                _HARNESS_SEEN[sid] = when
     _HARNESS_NAMES = {s: n for s, (_, n) in best.items()}
     return _HARNESS_NAMES
+
+
+def session_title(sid: str) -> str:
+    """Заголовок вкладки сессии — то, по чему её ищет оператор (не `kuzma-xx`).
+
+    Лежит в транскрипте `<config>/projects/<проект>/<sessionId>.jsonl` строками
+    `custom-title` (переименовал оператор) и `ai-title` (дал харнес); обе харнес
+    дописывает регулярно, поэтому читаем только хвост. Своё имя важнее авто.
+    Только локальные сессии; нет транскрипта или формат другой — пустая строка.
+    """
+    if sid in _TITLES:
+        return _TITLES[sid]
+    _TITLES[sid] = ""
+    full = _HARNESS_FULL.get(sid)
+    if not full:
+        return ""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
+    try:
+        found = sorted(Path(base, "projects").glob(f"*/{full}.jsonl"))
+        if not found:
+            return ""
+        with open(found[0], "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - TITLE_TAIL))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for key in ("customTitle", "aiTitle"):
+        hits = re.findall(r'"%s":"((?:[^"\\]|\\.)*)"' % key, tail)
+        if hits:
+            try:
+                _TITLES[sid] = " ".join(json.loads(f'"{hits[-1]}"').split())
+            except ValueError:
+                _TITLES[sid] = hits[-1]
+            break
+    return _TITLES[sid]
 
 SESSION_SHOW_MAX = 15
 # связь «коммит памяти → сессия»: дневник называется diary/<месяц>/<дата>.<sid>.md
@@ -376,11 +431,12 @@ def aka(row: dict) -> str:
     сессии, которая вторые сутки занималась другим).
     """
     name = row.get("agent")
+    title = f" «{row['title'][:60]}»" if row.get("title") else ""
     if not name:
-        return ""
+        return f" ({title.strip()})" if title else ""
     if not row.get("live", True):
-        return f" (`{name}`, закрыта)"
-    return f" (`{name}`)" if row.get("agent_ok") else f" (`{name}`?)"
+        return f" (`{name}`{title}, закрыта)"
+    return f" (`{name}`{title})" if row.get("agent_ok") else f" (`{name}`?{title})"
 
 
 def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
@@ -405,7 +461,8 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     if mark:
         mine.write_text(
             f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\n"
-            f"hosts: —\nagent: {names.get(sid, '—')}\n",
+            f"hosts: —\nagent: {names.get(sid, '—')}\n"
+            f"title: {session_title(sid) or '—'}\n",
             encoding="utf-8", newline="\n")
 
     notes = []  # служебные строки печатаются в конце блока, а не между блоками
@@ -433,13 +490,19 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         a = re.search(r"^agent:\s*(.+)$", text, re.M)
         agent = names.get(f.stem) or (a.group(1).strip() if a else "")
         agent_ok = f.stem in names  # разрешилось реестром харнеса, а не отметкой
+        ttl = re.search(r"^title:\s*(.+)$", text, re.M)
+        title = session_title(f.stem) or (ttl.group(1).strip() if ttl else "")
         acts = sorted(by_sid.get(f.stem, []), key=lambda c: c["when"] or now)
         # 🔑 Живость — по ФАКТУ работы, а не только по полю `updated`: коммит
         # с дневником сессии моложе её отметки, а дисциплины он не требует.
-        seen = [d for d in [upd] + [c["when"] for c in acts] if d]
+        # Плюс `updatedAt` реестра харнеса — для сессии этой машины, которая
+        # работает, но в память не коммитит (прецедент 18.09, см. _HARNESS_SEEN).
+        seen = [d for d in [upd, _HARNESS_SEEN.get(f.stem)]
+                + [c["when"] for c in acts] if d]
         last = max(seen) if seen else datetime.fromtimestamp(f.stat().st_mtime)
         rows.append({"sid": f.stem, "topic": (t.group(1).strip() if t else "—"),
                      "agent": "" if agent in ("—", "-") else agent,
+                     "title": "" if title in ("—", "-") else title,
                      "agent_ok": agent_ok,
                      "upd": upd or last, "last": last, "acts": acts, "file": f})
 
@@ -453,6 +516,7 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
         last = max([c["when"] for c in acts if c["when"]], default=now)
         rows.append({"sid": s, "topic": "— (отметка снята)", "upd": last,
                      "agent": names.get(s, ""), "agent_ok": s in names,
+                     "title": session_title(s),
                      "last": last, "acts": acts, "file": None})
 
     rows.sort(key=lambda r: r["last"], reverse=True)

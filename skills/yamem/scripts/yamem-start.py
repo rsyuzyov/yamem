@@ -44,6 +44,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from yamem_common import journal_root, parse_frontmatter, read_config, truthy
+from yamem_sync import safe_sync
 
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -296,18 +297,10 @@ def fetch_rebase(path: Path):
     его максимум обновит тем же хешем, портить нечего.
     ⚠️ Ветку берём как `@{u}`, а не по имени: в парке репозиториев вперемешку
     `main` и `master` — хардкод сломал бы половину.
+    ⚙️ Сама механика — в `yamem_sync.safe_sync`: её же агент зовёт руками перед
+    записью, и она переживает соседский `index.lock` и оборванный autostash.
     """
-    code, upstream, _ = run(["git", "rev-parse", "--abbrev-ref",
-                             "--symbolic-full-name", "@{u}"], cwd=path)
-    if code != 0:
-        return 1, "", "у текущей ветки нет upstream"
-    code, so, se = run(["git", "fetch", "--quiet"], cwd=path)
-    if code != 0:
-        return code, so, se
-    code, so, se = run(["git", "rebase", "--autostash", upstream], cwd=path)
-    # ⚠️ `rebase` пишет исход в stderr, а не в stdout (в отличие от `pull`),
-    # а вызывающий разбирает именно stdout — склеиваем, иначе там пусто.
-    return code, (so or se or "уже актуально"), se
+    return safe_sync(path)
 
 
 def sync(mem: Path, no_sync: bool, out: list):

@@ -461,14 +461,21 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     names = harness_names()
     mine = board / f"{sid}.md"
     started = stamp
+    hosts = "—"
     if mine.is_file():
-        m = re.search(r"^started:\s*(.+)$", mine.read_text(encoding="utf-8"), re.M)
+        old = mine.read_text(encoding="utf-8")
+        m = re.search(r"^started:\s*(.+)$", old, re.M)
         if m:
             started = m.group(1).strip()
+        # `hosts` копит хук yamem-hosts-hook.py по ходу работы — повторный старт
+        # его не обнуляет: поле отвечает «кто трогал», а не «что в планах»
+        m = re.search(r"^hosts:[ \t]*(.+)$", old, re.M)
+        if m and m.group(1).strip():
+            hosts = m.group(1).strip()
     if mark:
         mine.write_text(
             f"started: {started}\nupdated: {stamp}\ntopic: {topic or '—'}\n"
-            f"hosts: —\nagent: {names.get(sid, '—')}\n"
+            f"hosts: {hosts}\nagent: {names.get(sid, '—')}\n"
             f"title: {session_title(sid) or '—'}\n",
             encoding="utf-8", newline="\n")
 

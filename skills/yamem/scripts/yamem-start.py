@@ -157,6 +157,7 @@ def session_title(sid: str) -> str:
 SESSION_SHOW_MAX = 15
 # связь «коммит памяти → сессия»: дневник называется diary/<месяц>/<дата>.<sid>.md
 DIARY_SID = re.compile(r"diary/[^/]+/\d{4}-\d{2}-\d{2}\.([0-9a-f]{6,12})\.md$")
+DIARY_SID_MAX = 3  # больше дневников разных сессий в одном коммите — массовая переделка
 # сколько байт харнес пропускает в выводе инструмента, дальше подменяет превью;
 # `--part-limit` держим ниже с запасом, а по этому порогу только предупреждаем
 HARNESS_LIMIT = 28000
@@ -402,6 +403,12 @@ def recent_commits(root: Path, hours: int = 24) -> list:
             pass
         files = [f for f in rest.split("\n") if f.strip()]
         sids = {m.group(1) for f in files for m in [DIARY_SID.search(f)] if m}
+        # ⚠️ Коммит, трогающий дневники многих сессий, — служебная переделка памяти
+        # (склейка, переименование), а не работа этих сессий. Прецедент 19.09.2026:
+        # склейка дневников 12.08–15.09 записалась в активность ~300 сессий, и блок
+        # «Сессии за сутки» раздулся до ~300 строк ⚫. Такой коммит ни к кому не привязываем.
+        if len(sids) > DIARY_SID_MAX:
+            sids = set()
         items.append({"h": parts[0], "when": when, "subject": parts[2],
                       "files": files, "sids": sids,
                       "board": parts[2].startswith("sessions:")})

@@ -18,7 +18,7 @@ MEMORY.md — устойчивые, ориентирующие, кросс-за�
 ## Инфраструктура
 
 ### (пример) srv-db1 — основная БД
-PgPro 16, prodline. Доступ по ключу. Детали → [topics/db.md](topics/db.md)
+PgPro 16, acme. Доступ по ключу. Детали → [topics/db.md](topics/db.md)
 
 ## Ограничения
 

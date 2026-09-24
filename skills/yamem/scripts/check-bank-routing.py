@@ -9,13 +9,13 @@
 их нет, и без маркеров в конфиге он ничего не проверяет:
 
     banks:
-      - name: lion-site
-        path: banks/lion-site
+      - name: client-site
+        path: banks/client-site
         alienable: true            # банк читают посторонние (ремесло, общий с чужой командой)
-        markers: ['lion\\.local', '(?<![a-z0-9])pee-']
+        markers: ['client\\.local', '(?<![a-z0-9])cl-']
 
 Маркер — регулярное выражение Python, без учёта регистра. Границы слова пишутся в самом
-маркере: `sts` без них ловит «posts», `ag` — «diag.local».
+маркере: `ts` без них ловит «posts», `ag` — «diag.local».
 
 Два класса:
   1. маркер банка X в добавленной строке банка Y → «факту место в банке X» (предупреждение).

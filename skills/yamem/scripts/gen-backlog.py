@@ -84,7 +84,7 @@ def collect(tasks_dir: Path):
         if not task_md.is_file():
             complaints.append(f"tasks/{rel}/: нет task.md")
             return
-        # 🔑 форму проверяем строго, а читаем толерантно: `title: ЭДО prodline: адреса`
+        # 🔑 форму проверяем строго, а читаем толерантно: `title: ЭДО acme: адреса`
         # без кавычек разбирается «наполовину» и молча уезжает в бэклог обрезанным
         for problem in validate_frontmatter(task_md):
             complaints.append(f"tasks/{rel}/task.md: {problem}")

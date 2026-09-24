@@ -1,6 +1,6 @@
 ---
 title: (пример) Краткое название задачи
-client: prodline
+client: acme
 author: Роман
 created: 2026-01-01
 updated: 2026-01-01

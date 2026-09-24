@@ -17,6 +17,11 @@ banks:
   #   path: banks/admin-recipes
   #   type: submodule       # submodule | directory
   #   pull_on_start: true
+  #   alienable: true       # банк читают посторонние: маркер чужого контура в нем блокирует коммит
+  # - name: acme-site
+  #   path: banks/acme-site
+  #   markers: ['acme\.local', '[a-z0-9]\.acme\b']   # регулярки хостов/доменов контура; гейт
+  #                         # routing'а (scripts/check-bank-routing.py) без маркеров молчит
 
 commit_on_update: false   # git commit при обновлении памяти (если это git-репозиторий)
 

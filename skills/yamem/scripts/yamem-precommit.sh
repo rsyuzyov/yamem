@@ -27,6 +27,13 @@ elif [ -f "$root/.agents/memory/yamem.config.yaml" ] &&
      git diff --cached --name-only | grep -q '^\.agents/memory/'; then
     mem="$root/.agents/memory"
 fi
+# Банк-репозиторий внутри памяти (`<память>/banks/<банк>`, обычно субмодуль): представлений
+# у него нет, но гейт routing'а нужен именно здесь — отчуждаемые банки живут субмодулями.
+bank=""
+if [ -z "$mem" ] && [ -f "$root/../../yamem.config.yaml" ]; then
+    mem=$(cd "$root/../.." && pwd)
+    bank=1
+fi
 [ -n "$mem" ] || exit 0
 
 # ⏱ Отметка на доске сессий (`.sessions/<sid>.md`) не влияет ни на представления,
@@ -50,7 +57,7 @@ fi
 #
 # Требуем pathspec только когда красть есть у кого: живых сессий больше одной.
 # Живость — по свежим (6 ч) отметкам на доске и файлам дневника, sid берём из имени.
-if [ -z "$YAMEM_ALLOW_FULL_INDEX" ] &&
+if [ -z "$bank" ] && [ -z "$YAMEM_ALLOW_FULL_INDEX" ] &&
    ! printf '%s' "$GIT_INDEX_FILE" | grep -q 'next-index'; then
     gitdir=$(git rev-parse --git-dir 2>/dev/null)
     inflight=""
@@ -118,6 +125,16 @@ for candidate in python3 python py; do
 done
 [ -n "$python" ] || exit 0
 
+# 🧭 Routing банков: маркер контура (хост, домен, учетка — из `markers` банка в конфиге)
+# в добавляемой строке ЧУЖОГО банка. В отчуждаемом банке (`alienable: true`) — утечка,
+# коммит стоит (обход: YAMEM_ALLOW_ROUTING=1); в прочих — только предупреждение.
+# Без маркеров в конфиге скрипт молчит.
+routing_rc=0
+if [ -f "$scripts/check-bank-routing.py" ]; then
+    PYTHONIOENCODING=utf-8 "$python" "$scripts/check-bank-routing.py" --memory "$mem" || routing_rc=1
+fi
+[ -z "$bank" ] || exit "$routing_rc"
+
 rc=0
 PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-backlog.py" --memory "$mem" --check || rc=1
 PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-topics-index.py" --memory "$mem" --check || rc=1
@@ -139,4 +156,4 @@ if [ "$rc" -ne 0 ]; then
     echo "       Жалобы на фронтматтер выше чинятся в самих задачах и топиках."
     exit 1
 fi
-exit 0
+exit "$routing_rc"

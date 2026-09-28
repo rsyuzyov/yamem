@@ -343,6 +343,10 @@ def sync(mem: Path, no_sync: bool, out: list):
     # причём каждый возвращал «уже актуально». Параллельно — по самому долгому.
     # проверка своей версии едет тем же параллельным блоком — раунда не добавляет
     self_lines = []
+    # ⏱ проверка брошенных правок (~1 с на все банки) едет рядом с fetch: возраст
+    # она считает по учету «впервые увидел», а не по mtime, так что ребейз ей не мешает
+    stalepool = ThreadPoolExecutor(max_workers=max(len(pullable), 1))
+    stale_futures = [stalepool.submit(stale_uncommitted, path) for _, path in pullable]
     with ThreadPoolExecutor(max_workers=1) as selfpool:
         self_future = selfpool.submit(self_update_check, no_sync, self_lines)
         if pullable:
@@ -363,9 +367,65 @@ def sync(mem: Path, no_sync: bool, out: list):
             TIMING["pull"] = time.monotonic() - t0
         self_future.result()
     out += self_lines
+    stale_by_repo = [future.result() for future in stale_futures]
+    stalepool.shutdown()
+    for (name, _path), stale in zip(pullable, stale_by_repo):
+        if stale:
+            oldest, shown = stale[0][0], ", ".join(f"`{p}`" for _, p in stale[:3])
+            more = f" и еще {len(stale) - 3}" if len(stale) > 3 else ""
+            out.append(f"- ⚠️ {name}: незакоммичено {len(stale)} старше "
+                       f"{STALE_WORK_HOURS} ч (старейшее {oldest:.0f} ч): {shown}{more} — "
+                       "чей-то коммит оборвался (pre-commit, lock); разобрать и "
+                       "закоммитить явными путями")
     if inside:
         out.append(f"- {', '.join(inside)}: в составе репозитория памяти")
     out.append("")
+
+
+STALE_WORK_HOURS = 3
+
+
+def stale_uncommitted(repo: Path) -> list:
+    """Правки в рабочей копии, которые лежат незакоммиченными дольше порога.
+
+    🔑 Правило памяти — коммитить сразу после своего блока, поэтому правка старше
+    нескольких часов почти наверняка брошена: коммит упал на pre-commit или на
+    чужом `index.lock`, а сессия этого не заметила (прецедент 28.09: журналы
+    сессии 26.09 и задача 21.09 висели застейдженными неделю). Доска `.sessions`
+    не в счет — ее подбирает запись отметки. Возвращает [(возраст_ч, путь)],
+    старые первыми.
+
+    ⚠️ Возраст — с момента, когда стартер ВПЕРВЫЕ увидел правку, а не по mtime:
+    синхронизация при отставании прячет правки в тайник и возвращает их, и mtime
+    всех грязных файлов становится «сейчас» на каждом таком старте. Когда правка
+    впервые замечена, помнит локальный файл в каталоге `.git` — в git он не едет.
+    """
+    code, so, _ = run(["git", "-c", "core.quotepath=off", "status", "--porcelain",
+                       "--untracked-files=all", "--ignore-submodules=all"],
+                      cwd=repo, timeout=30)
+    gcode, gitdir, _ = run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo)
+    if code != 0 or gcode != 0:
+        return []
+    seen_file = Path(gitdir) / "yamem-dirty-seen.json"
+    try:
+        first_seen = json.loads(seen_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        first_seen = {}
+    now, current = time.time(), {}
+    for line in so.splitlines():
+        # run() срезает пробелы вывода, и у первой строки ` M путь` пропадает
+        # ведущий пробел статуса ⟹ срез `line[3:]` съел бы первую букву пути
+        parsed = re.match(r"^[ MADRCUT?!]{1,2} (.+)$", line)
+        rel = parsed.group(1).split(" -> ")[-1].strip('"') if parsed else ""
+        if not rel or rel.startswith(".sessions/") or (repo / rel).is_dir():
+            continue  # каталог — указатель субмодуля, у банка своя проверка
+        current[rel] = first_seen.get(rel, now)
+    try:
+        seen_file.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    found = [((now - since) / 3600, rel) for rel, since in current.items()]
+    return sorted(item for item in found if item[0] >= STALE_WORK_HOURS)[::-1]
 
 
 def recent_commits(root: Path, hours: int = 24) -> list:
@@ -540,17 +600,39 @@ def sessions(root: Path, sid: str, topic: str, prune: bool, no_sync: bool,
     # репозиторий (было 2026-08-16). По той же причине на копии ничего не сносим.
     if mark and git_root(root) is not None and not no_sync:
         t0 = time.monotonic()
-        paths = [f".sessions/{sid}.md"]
         for name in removed:
             (board / f"{name}.md").unlink(missing_ok=True)
-            paths.append(f".sessions/{name}.md")
-        run(["git", "add", "--"] + paths, cwd=root)
+        # 🔑 Коммитим доску ЦЕЛИКОМ, а не свою отметку и снятые: так каждый старт
+        # подбирает хвосты прогонов, оборвавшихся между unlink и commit (вечные ` D`),
+        # отметки, ни разу не доехавшие до git (`??`), и поле `hosts`, которое хук
+        # пишет только локально (`M`). Прецедент 28.09: на доске висело 36 удалений.
+        paths = [".sessions"]
+        acode, aout, aerr = run(["git", "add", "-A", "--"] + paths, cwd=root)
         code, _, _ = run(["git", "diff", "--cached", "--quiet", "--"] + paths, cwd=root)
+        if acode != 0:
+            # чужой index.lock: add не прошел, в индексе пусто, и diff молчит
+            code = 1
         if code == 1:  # есть что коммитить
             msg = f"sessions: {sid} в работе"
             if removed:
                 msg += f"; снято брошенных: {len(removed)}"
-            run(["git", "commit", "-q", "-m", msg, "--"] + paths, cwd=root)
+            ccode, cout, cerr = run(["git", "commit", "-q", "-m", msg, "--"] + paths,
+                                    cwd=root)
+            if ccode != 0:
+                # ⚠️ Раньше здесь безусловно печаталось «закоммичена», и упавший
+                # коммит (чужой index.lock, pre-commit) оставлял доску грязной молча.
+                errlines = (aerr + "\n" + cerr + "\n" + cout).splitlines()
+                reason = next((line for line in errlines
+                               if line.startswith(("fatal", "error", "⛔"))),
+                              next((line for line in errlines if line.strip()),
+                                   f"код {ccode}"))
+                notes.append(f"- ⚠️ отметка НЕ закоммичена: {reason[:160]} — "
+                             "доска останется в рабочей копии, следующий старт подберет")
+                TIMING["mark"] = time.monotonic() - t0
+                ccode = None
+        else:
+            ccode = None
+        if ccode == 0:
             # ⏱ push отметки — 5 с сетевого ожидания, которых старт не должен ждать:
             # соседи читают доску не в эту же секунду, а нам она уже записана локально.
             # Отпускаем в фон; провалившийся push всплывёт при следующем pull.

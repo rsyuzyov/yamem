@@ -356,7 +356,10 @@ def sync(mem: Path, no_sync: bool, out: list):
                            for name, path in pullable}
                 for name, _ in pullable:
                     code, so, se = futures[name].result()
-                    if code == 0:
+                    if code == 0 and "⚠️" in so:
+                        # предупреждение синхронизации (правки ушли в тайник) — целиком
+                        out.append(f"- ⚠️ {name}: synced, но {so}")
+                    elif code == 0:
                         lines = so.splitlines()
                         state = ("уже актуально" if "up to date" in so.lower()
                                  else (lines[-1][:80] if lines else "готово"))

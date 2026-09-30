@@ -110,6 +110,42 @@ def heal_orphan_autostash(repo: Path, min_age: float = ORPHAN_MIN_AGE_SEC):
     return f"оборванный ребейз починен: правки уже в рабочей копии, тайник сохранён (stash@{{0}})"
 
 
+AUTOSTASH_CONFLICT = "Applying autostash resulted in conflicts"
+
+
+def park_autostash_conflict(repo: Path) -> str:
+    """Ребейз прошёл, а незакоммиченные правки не легли обратно: конфликт с пришедшим.
+
+    ⚠️🔴 Git в этом случае отвечает кодом 0, пишет «Successfully rebased» последней
+    строкой и оставляет правки в `stash@{0}` с именем `autostash`, а конфликтные файлы —
+    с маркерами и в состоянии unmerged. Последнюю строку печатал стартер ⟹ сессия не
+    узнавала, что ее правка ушла из рабочей копии (прецедент 28.09.2026, банк lion-site:
+    тайник провисел до оптимизации). Unmerged в ОБЩЕМ индексе вдобавок блокирует
+    `git commit` всем сессиям, даже с pathspec.
+    ⟹ Конфликтные файлы возвращаем к пришедшей версии, тайнику даём говорящее имя,
+    а в отчёт — что и где лежит. Сливать правку руками — дело сессии, чья она.
+    """
+    _, unmerged, _ = run(["git", "-c", "core.quotepath=off", "diff", "--name-only",
+                          "--diff-filter=U"], cwd=repo)
+    conflicted = unmerged.splitlines()
+    if conflicted:
+        run(["git", "checkout", "HEAD", "--"] + conflicted, cwd=repo)
+    # чисто легшие файлы git при конфликте оставляет застейдженными — в общем индексе
+    # их унёс бы чужой коммит; снимаем со стейджа, содержимое остаётся в рабочей копии
+    _, stashed, _ = run(["git", "-c", "core.quotepath=off", "stash", "show",
+                         "--name-only", "stash@{0}"], cwd=repo)
+    if stashed:
+        run(["git", "reset", "-q", "--"] + stashed.splitlines(), cwd=repo)
+    _, sha, _ = run(["git", "rev-parse", "stash@{0}"], cwd=repo)
+    stamp = datetime.now().strftime("%d.%m %H:%M")
+    label = f"yamem: конфликт autostash {stamp}: {', '.join(conflicted[:5])}"
+    if sha and run(["git", "stash", "drop", "-q", "stash@{0}"], cwd=repo)[0] == 0:
+        run(["git", "stash", "store", "-m", label, sha], cwd=repo)
+    return (f"⚠️ незакоммиченные правки не легли обратно после ребейза: "
+            f"{', '.join(conflicted) or '?'} — в рабочей копии версия из upstream, своя — "
+            f"`git show stash@{{0}}:<файл>`; слить руками, закоммитить, `git stash drop`")
+
+
 def safe_sync(repo: Path):
     """fetch + rebase на upstream. Возврат: (код, отчёт, stderr)."""
     repo = Path(repo)
@@ -137,6 +173,8 @@ def safe_sync(repo: Path):
         code, out, err = run(["git", "rebase", "--autostash", upstream], cwd=repo)
         if code == 0:
             lines = "\n".join(filter(None, [out, err])).splitlines()
+            if AUTOSTASH_CONFLICT in out + err:
+                notes.insert(0, park_autostash_conflict(repo))
             return 0, "; ".join(notes + [lines[-1][:80] if lines else "готово"]), ""
         healed = heal_orphan_autostash(repo, min_age=0)
         if healed:

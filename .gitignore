@@ -1,3 +1,6 @@
 notes.txt
 temp/
 __pycache__/
+# лог crashpad от Electron-процесса (askpass VS Code при git.autofetch): пишется в cwd, то есть в корень репозитория
+*.stackdump
+debug.log

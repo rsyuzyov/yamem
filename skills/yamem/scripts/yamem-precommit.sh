@@ -133,6 +133,13 @@ routing_rc=0
 if [ -f "$scripts/check-bank-routing.py" ]; then
     PYTHONIOENCODING=utf-8 "$python" "$scripts/check-bank-routing.py" --memory "$mem" || routing_rc=1
 fi
+
+# ⚠️🔴 Переводы строк: текст с CRLF в индексе при `eol=lf` git считает измененным у всех сессий навсегда,
+# а синхронизация прячет такие файлы в autostash и не может вернуть (прецедент 16.10.2026: 14 тайников
+# за вечер, записи памяти уезжали туда же). Проверяются только файлы коммита. Обход: YAMEM_ALLOW_EOL=1.
+if [ -f "$scripts/check-eol.py" ]; then
+    PYTHONIOENCODING=utf-8 "$python" "$scripts/check-eol.py" || routing_rc=1
+fi
 [ -z "$bank" ] || exit "$routing_rc"
 
 rc=0

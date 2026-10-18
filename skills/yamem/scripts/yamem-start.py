@@ -843,7 +843,7 @@ def deadlines_block(rows: list, root: Path, out: list, horizon: int = 45, limit:
 
 
 def closing_candidates_block(rows: list, root: Path, out: list, limit: int = 8,
-                             stale_days: int = 14):
+                             stale_days: int = 14, skip=None):
     """Задачи, которые пора закрыть или подтвердить. Спрашиваем — сами знать не можем.
 
     🎯 Мотив (разбор 03.09.2026): закрытия шли ПАЧКАМИ на ревизиях — 38 задач
@@ -870,6 +870,12 @@ def closing_candidates_block(rows: list, root: Path, out: list, limit: int = 8,
 
     cands = []
     for rel, fm, title in rows:
+        if skip is not None and skip(rel, fm):
+            # 🔑 Темы и задачи на операторской паузе в кандидаты не идут: у темы
+            # критерий «закрывается с подзадачами», она физически не может выйти
+            # из in-progress и торчит в списке вечно (замер 18.10.2026: 6 из 22
+            # в одной группе — зонтики). Пауза (`paused: true`) — тоже не застой.
+            continue
         status = fm.get("status")
         a = age(fm)
         d = deadline_of(root / "tasks" / rel / "task.md", today, title, fm)
@@ -1052,9 +1058,21 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
     # в каждом дайджесте до следующей оптимизации памяти.
     today = datetime.now().date()
 
+    # 🔑 Кто НЕ считается протухшим (решение оператора 18.10.2026):
+    #   • тема (зонтик) — та задача, на которую сослались в чужом `epic`. Её
+    #     критерий «не закрывается, пока идёт работа подзадач» ⟹ она не может
+    #     выйти из in-progress и вечно торчит в счётчике, пряча настоящий застой;
+    #   • задача на операторской паузе — `paused: true`.
+    epic_slugs = {rel.split("/")[-1] for rel in epic_index(rows)}
+
+    def not_a_backlog_noise(rel, fm):
+        return rel.split("/")[-1] in epic_slugs or truthy(fm.get("paused"))
+
     def stale(section, days):
         n = 0
-        for _rel, fm in section:
+        for rel, fm in section:
+            if not_a_backlog_noise(rel, fm):
+                continue
             u = fm.get("updated", "")
             if DATE_RE.match(u) and (today - datetime.strptime(u, "%Y-%m-%d").date()).days > days:
                 n += 1
@@ -1086,7 +1104,7 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
     block("🔥 Срочно и важно", hot, limit=hot_limit)
     named = [(rel, fm, fm.get("title", rel)) for rel, fm in openable]
     deadlines_block(named, root, out)
-    closing_candidates_block(named, root, out)
+    closing_candidates_block(named, root, out, skip=not_a_backlog_noise)
     epics_block(rows, epic_index(rows), root / "tasks", out)
     if part_hint:
         out.append(f"📋 Списки задач — «в работе» ({len(working)}), «ожидает» ({len(waiting)}), "

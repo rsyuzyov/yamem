@@ -30,7 +30,7 @@ ARCHIVE_BEGIN = "<!-- yamem:archive:begin -->"
 ARCHIVE_END = "<!-- yamem:archive:end -->"
 GENERATED_NOTE = "<!-- сгенерировано scripts/gen-backlog.py — руками не править -->"
 
-STATUSES = ("new", "in-progress", "waiting", "done")
+STATUSES = ("new", "in-progress", "waiting", "paused", "done")
 REQUIRED = ("title", "created", "updated", "status")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -276,7 +276,9 @@ def render_backlog(rows, index=None, tasks_dir: Path = None) -> str:
     active = [r for r in rows if r[1].get("status") != "done"]
     working = [r for r in active if r[1].get("status") == "in-progress"]
     waiting = [r for r in active if r[1].get("status") == "waiting"]
-    rest = [r for r in active if r[1].get("status") not in ("in-progress", "waiting")]
+    paused = [r for r in active if r[1].get("status") == "paused"]
+    rest = [r for r in active
+            if r[1].get("status") not in ("in-progress", "waiting", "paused")]
 
     def quadrant(urgent: bool, important: bool):
         return [r for r in rest
@@ -290,12 +292,13 @@ def render_backlog(rows, index=None, tasks_dir: Path = None) -> str:
         ("⚡ Срочно, не важно", quadrant(True, False)),
         ("💤 Идеи — ни срочно, ни важно", quadrant(False, False)),
         ("⏸ Ожидает внешнего действия", waiting),
+        ("⏸ На паузе", paused),
     ]
 
     out = [GENERATED_NOTE, ""]
     out.append(
         f"Открытых задач: **{len(active)}** — в работе {len(working)}, "
-        f"ждут {len(waiting)}, прочих {len(rest)}."
+        f"ждут {len(waiting)}, на паузе {len(paused)}, прочих {len(rest)}."
     )
     out.append("")
 

@@ -876,6 +876,10 @@ def closing_candidates_block(rows: list, root: Path, out: list, limit: int = 8,
             # из in-progress и торчит в списке вечно (замер 18.10.2026: 6 из 22
             # в одной группе — зонтики). Пауза (`paused: true`) — тоже не застой.
             continue
+        if fm.get("status") == "paused":
+            # Пауза — сознательное решение оператора, а не застой и не повод
+            # закрывать: задача вернётся, поэтому и в кандидаты не идёт.
+            continue
         status = fm.get("status")
         a = age(fm)
         d = deadline_of(root / "tasks" / rel / "task.md", today, title, fm)
@@ -952,7 +956,8 @@ def epics_block(rows, index, tasks_dir: Path, out: list):
     for rel in sorted(live, key=lambda r: fm_of.get(r, {}).get("updated", ""), reverse=True):
         kids, fm = live[rel], fm_of.get(rel, {})
         n = lambda s: sum(1 for _, f in kids if f.get("status") == s)  # noqa: E731
-        parts = [f"{n('in-progress')} в работе", f"{n('waiting')} ждут", f"{n('new')} новых"]
+        parts = [f"{n('in-progress')} в работе", f"{n('waiting')} ждут",
+                 f"{n('paused')} на паузе", f"{n('new')} новых"]
         counts = ", ".join(p for p in parts if not p.startswith("0 "))
         pr = prompt_of(tasks_dir, rel)
         tail = f" · 📝 промпт {pr}" if pr else " · ⚠️ промпта нет"
@@ -995,13 +1000,15 @@ def task_entries(root: Path) -> list:
     index = epic_index(rows)
     of_epic = {kid: rel.split("/")[-1] for rel, kids in index.items() for kid, _ in kids}
     by = lambda s: [r for r in openable if r[1].get("status") == s]  # noqa: E731
-    rest = [r for r in openable if r[1].get("status") not in ("in-progress", "waiting")]
+    rest = [r for r in openable
+            if r[1].get("status") not in ("in-progress", "waiting", "paused")]
     quad = lambda u, i: [r for r in rest if truthy(r[1].get("urgent")) == u  # noqa: E731
                          and truthy(r[1].get("important")) == i]
 
     entries = []
     for title, section in (("🔧 В работе", by("in-progress")),
                            ("⏸ Ожидает внешнего действия", by("waiting")),
+                           ("⏸ На паузе", by("paused")),
                            ("🔥 Срочно и важно", quad(True, True)),
                            ("⭐ Важно, не срочно", quad(False, True)),
                            ("⚡ Срочно, не важно", quad(True, False)),
@@ -1041,15 +1048,17 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
 
     openable = [r for r in rows if r[1].get("status") != "done"]
     by = lambda s: [r for r in openable if r[1].get("status") == s]  # noqa: E731
-    working, waiting = by("in-progress"), by("waiting")
-    rest = [r for r in openable if r[1].get("status") not in ("in-progress", "waiting")]
+    working, waiting, paused = by("in-progress"), by("waiting"), by("paused")
+    rest = [r for r in openable
+            if r[1].get("status") not in ("in-progress", "waiting", "paused")]
     hot = [r for r in rest if truthy(r[1].get("urgent")) and truthy(r[1].get("important"))]
     important = [r for r in rest if not truthy(r[1].get("urgent")) and truthy(r[1].get("important"))]
     ideas = [r for r in rest if not truthy(r[1].get("urgent")) and not truthy(r[1].get("important"))]
     urgent_only = [r for r in rest if truthy(r[1].get("urgent")) and not truthy(r[1].get("important"))]
 
     out.append(f"## Задачи: {len(rows)} (открытых {len(openable)})")
-    out.append(f"в работе {len(working)} · ждут {len(waiting)} · срочно+важно {len(hot)} · "
+    out.append(f"в работе {len(working)} · ждут {len(waiting)} · на паузе {len(paused)} · "
+               f"срочно+важно {len(hot)} · "
                f"срочно {len(urgent_only)} · важно {len(important)} · идеи {len(ideas)}")
 
     # 🎯 «В работе 57» — цифра, в которую не верит и сам оператор: столько задач
@@ -1058,15 +1067,17 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
     # в каждом дайджесте до следующей оптимизации памяти.
     today = datetime.now().date()
 
-    # 🔑 Кто НЕ считается протухшим (решение оператора 18.10.2026):
-    #   • тема (зонтик) — та задача, на которую сослались в чужом `epic`. Её
-    #     критерий «не закрывается, пока идёт работа подзадач» ⟹ она не может
-    #     выйти из in-progress и вечно торчит в счётчике, пряча настоящий застой;
-    #   • задача на операторской паузе — `paused: true`.
+    # 🔑 Кто НЕ считается протухшим (решение оператора 18.10.2026): тема (зонтик) —
+    # та задача, на которую сослались в чужом `epic`. Её критерий «не закрывается,
+    # пока идёт работа подзадач» ⟹ она не может выйти из in-progress и вечно торчит
+    # в счётчике, пряча настоящий застой.
+    # ⚠️ Паузы отдельным полем НЕ заводим: снять задачу с повестки — это `status: done`
+    # с причиной в теле (так же закрываются «неактуально»). Отложенная задача, к которой
+    # вернутся, заводится заново — история остаётся в архиве.
     epic_slugs = {rel.split("/")[-1] for rel in epic_index(rows)}
 
     def not_a_backlog_noise(rel, fm):
-        return rel.split("/")[-1] in epic_slugs or truthy(fm.get("paused"))
+        return rel.split("/")[-1] in epic_slugs
 
     def stale(section, days):
         n = 0
@@ -1108,10 +1119,12 @@ def tasks(root: Path, out: list, hot_limit=None, part_hint=""):
     epics_block(rows, epic_index(rows), root / "tasks", out)
     if part_hint:
         out.append(f"📋 Списки задач — «в работе» ({len(working)}), «ожидает» ({len(waiting)}), "
+                   f"«на паузе» ({len(paused)}), "
                    f"«важно» ({len(important)}), «идеи» ({len(ideas)}) — целиком {part_hint}.")
         out.append("")
     else:
         block("⏸ Ожидает внешнего действия", waiting)
+        block("⏸ На паузе", paused)
         block("🔧 В работе", working)
         block("⚡ Срочно, не важно", urgent_only, limit=5)
 

@@ -408,23 +408,26 @@ sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --si
 🎯 Прецеденты 23.10 и 24.10.2026: голый `python` дал 127 на всех частях стартера; в первый раз
 сессия перезапустила не все части и пошла работать без `MEMORY.md`.
 
-⚠️ **Windows.** Путь к навыку там с обратными слэшами (`C:\Users\…\yamem`) — **всегда в кавычках**,
-как в примерах: без них bash съедает `\`, и путь превращается в `C:Users…`.
-- Bash-инструмент (Claude Code — это Git Bash) — тот же `sh "<навык>/scripts/yamem" …`.
-- Оболочка агента — PowerShell (Codex, Kimi Work) — запускатель `yamem.ps1`, с обходом политики
-  выполнения (на клиентских Windows по умолчанию `Restricted`, и `.ps1` не запустится вовсе):
-  `powershell -NoProfile -ExecutionPolicy Bypass -File "<навык>\scripts\yamem.ps1" start …`.
-  Bash-конструкции переводить, а не копировать: `2>/dev/null` → `2>$null`.
-- ⚠️ **Без Git for Windows Claude Code сам переходит на инструмент PowerShell** (документация Claude Code,
-  «Set up on Windows»), и хуки с `command` без поля `shell` тоже идут в PowerShell. Там `sh` нет ⟹
-  только `yamem.ps1`. 🔴 `bash` в PowerShell на Windows — это обычно **WSL** (`C:\Windows\System32\bash.exe`),
-  а не Git Bash: звать его за sh нельзя, скрипты поедут в другую ОС с другими путями.
-- Git Bash установлен, но Claude Code его не видит — `CLAUDE_CODE_GIT_BASH_PATH` в `env` settings.json.
-- Сам git памяти нужен всегда (синхронизация, коммиты, доска сессий): нет git — запускатель останавливается
-  сбоем окружения. Git-хуки (pre-commit) Git for Windows запускает своим `sh`, от PATH это не зависит.
-- Хук `hosts` в общем `settings.json` проекта написан под sh. На машине без Git Bash — переопределить его
-  в машинном `.claude/settings.local.json` вариантом
-  `{"type": "command", "shell": "powershell", "command": "& \"$env:CLAUDE_PROJECT_DIR\\.agents\\skills\\yamem\\skills\\yamem\\scripts\\yamem.ps1\" hosts-hook"}`.
+⚠️ **Windows.** Запускатель один — `scripts/yamem` (sh). 🔑 yamem без git не работает (синхронизация,
+коммиты, доска сессий), а Git for Windows всегда несёт свой `sh.exe` ⟹ на любой машине, где yamem
+вообще может работать, sh есть — только не всегда в PATH.
+- Путь к навыку там с обратными слэшами (`C:\Users\…\yamem`) — **всегда в кавычках**, как в примерах:
+  без них bash съедает `\`, и путь превращается в `C:Users…`.
+- Claude Code при установленном Git сам берёт Git Bash и для инструмента Bash, и для хуков ⟹ тот же
+  `sh "<навык>/scripts/yamem" …`; хук `hosts` из общего `settings.json` работает как есть.
+  Git Bash установлен, но Claude Code его не находит — `CLAUDE_CODE_GIT_BASH_PATH` в `env` settings.json.
+- Оболочка агента — PowerShell (Codex, Kimi Work; Claude Code без Git for Windows): `sh` не в PATH,
+  звать Git-овский по пути, который даёт сам git:
+  ```powershell
+  $gitSh = Join-Path (git --exec-path) '..\..\..\bin\sh.exe'
+  & $gitSh "<навык>/scripts/yamem" start --memory <путь> --sid <sid> --part 1
+  ```
+  Путь — через `git --exec-path`, а не `Get-Command git`: у git из scoop `Get-Command` вернёт shim,
+  от которого до `sh.exe` не дойти. Нет git — нет и памяти: это сбой, а не повод искать обход.
+  Bash-конструкции в самом PowerShell переводить, а не копировать: `2>/dev/null` → `2>$null`.
+- 🔴 `bash` в PowerShell на Windows — это обычно **WSL** (`C:\Windows\System32\bash.exe`), а не Git Bash:
+  звать его за sh нельзя, скрипты поедут в другую ОС с другими путями.
+- Git-хуки (pre-commit) Git for Windows запускает своим `sh`, от PATH это не зависит.
 - cmd навык не использует.
 
 ⛔🔴 **`>>` для файлов памяти в PowerShell

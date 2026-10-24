@@ -1,0 +1,172 @@
+#!/bin/sh
+# yamem: запускатель скриптов навыка — единственный способ их вызывать.
+#
+#     sh <навык>/scripts/yamem start --memory <путь> --sid <sid> --part 1
+#     sh <навык>/scripts/yamem sync <репозиторий памяти>
+#     sh <навык>/scripts/yamem gen-backlog --memory <путь> --apply
+#     sh <навык>/scripts/yamem --check-env              # проверить окружение
+#     sh <навык>/scripts/yamem --which-python           # напечатать выбранный интерпретатор
+#     sh <навык>/scripts/yamem --set-python "<команда>" --memory <путь>   # записать в локальный конфиг
+#
+# Первый аргумент — имя скрипта без `.py` (`gen-backlog`, `check-eol`) либо короткое
+# имя: `start`, `sync`, `repo-tails`, `hosts-hook`.
+#
+# 🎯 Зачем: имя интерпретатора у машин разное. На Debian есть только `python3`,
+# на Windows `python3` бывает заглушкой Microsoft Store (печатает «Python» и
+# возвращает 9009/49), а рабочий — `python` или `py -3`. Голый `python` в навыке
+# давал 127 на всех частях стартера, и сессия шла дальше без памяти (прецеденты
+# 23.10 и 24.10.2026 на claude1).
+#
+# Откуда берётся интерпретатор, по порядку:
+#   1. переменная YAMEM_PYTHON;
+#   2. локальный конфиг `yamem.local.yaml` в каталоге памяти (строка `python: <команда>`).
+#      Файл машинный и в git не идёт (.gitignore памяти): одна память, разные машины.
+#      Нужен, только когда автоопределение не справилось — питон не в PATH, нужна
+#      конкретная версия;
+#   3. автоопределение: python3, python, py -3 — пробным запуском, а не `command -v`.
+# ⚠️ Команда делится по пробелам (`py -3` — два слова) ⟹ путь с пробелами не годится:
+# указывай короткий путь или путь без пробелов.
+#
+# ⛔ Сбой окружения — ГРОМКО: строка `yamem: СБОЙ ОКРУЖЕНИЯ`, варианты починки и
+# код 3. Агент по этому коду останавливается и спрашивает оператора (SKILL.md,
+# «Сбой — стоп»). Молча пропускать работу запускатель не умеет намеренно.
+
+YAMEM_MIN_PYTHON="3.10"   # `dict | None` в сигнатурах, `removesuffix`
+LOCAL_CONFIG_NAME="yamem.local.yaml"
+case "$0" in */*) scriptDir=${0%/*} ;; *) scriptDir=. ;; esac
+
+environmentFailure() {
+    {
+        echo "yamem: СБОЙ ОКРУЖЕНИЯ — $1"
+        shift
+        for detailLine in "$@"; do
+            echo "  $detailLine"
+        done
+        echo "  ⛔ Работу с памятью не продолжать молча: сообщить оператору и предложить варианты."
+    } >&2
+    exit 3
+}
+
+probePython() {
+    # shellcheck disable=SC2086 — `py -3` намеренно делится на слова
+    $1 -c "import sys; sys.exit(0 if sys.version_info >= tuple(int(part) for part in '$YAMEM_MIN_PYTHON'.split('.')) else 4)" >/dev/null 2>&1
+}
+
+# Каталог памяти — где искать локальный конфиг: YAMEM_MEMORY, аргумент `--memory`,
+# позиционный путь к памяти (`sync <репозиторий>`), корень git-репозитория из cwd
+# (сам репозиторий памяти либо проект с `.agents/memory`).
+memoryDir=""
+pickMemoryDir() {
+    for memoryCandidate in "$@"; do
+        if [ -n "$memoryCandidate" ] && [ -f "$memoryCandidate/yamem.config.yaml" -o -f "$memoryCandidate/MEMORY.md" ]; then
+            memoryDir=$memoryCandidate
+            return 0
+        fi
+    done
+    return 1
+}
+memoryArgument=""
+previousArgument=""
+for argumentValue in "$@"; do
+    [ "$previousArgument" = "--memory" ] && memoryArgument=$argumentValue
+    previousArgument=$argumentValue
+done
+gitTopLevel=$(git rev-parse --show-toplevel 2>/dev/null)
+pickMemoryDir "$YAMEM_MEMORY" "$memoryArgument" "$2" "$gitTopLevel" "${gitTopLevel:+$gitTopLevel/.agents/memory}" || true
+localConfigPath="${memoryDir:+$memoryDir/$LOCAL_CONFIG_NAME}"
+
+configuredPython() {
+    [ -n "$localConfigPath" ] && [ -f "$localConfigPath" ] || return 1
+    sed -n 's/^python:[[:space:]]*//p' "$localConfigPath" | head -1 |
+        sed 's/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/'
+}
+
+if [ "$1" = "--set-python" ]; then
+    requestedPython=$2
+    [ -n "$requestedPython" ] ||
+        environmentFailure "не указана команда." "пример: sh $scriptDir/yamem --set-python python3 --memory <путь к памяти>"
+    [ -n "$memoryDir" ] ||
+        environmentFailure "не найден каталог памяти для $LOCAL_CONFIG_NAME." "укажи его: --memory <путь к .agents/memory>"
+    probePython "$requestedPython" ||
+        environmentFailure "«$requestedPython» не запускается или старше Python $YAMEM_MIN_PYTHON — в конфиг не записано."
+    {
+        echo "# Машинные настройки yamem: в git не идут, на каждой машине свои."
+        echo "python: $requestedPython"
+    } > "$localConfigPath"
+    echo "yamem: записано в $localConfigPath — python: $requestedPython"
+    exit 0
+fi
+
+pythonCommand=""
+triedCandidates=""
+noteCandidate() {
+    candidateName=${1%% *}
+    if command -v "$candidateName" >/dev/null 2>&1; then
+        candidateVersion=$($1 --version 2>&1 | head -1)
+        triedCandidates="$triedCandidates${triedCandidates:+, }$2$1 (есть, но не годится: ${candidateVersion:-не запускается})"
+    else
+        triedCandidates="$triedCandidates${triedCandidates:+, }$2$1 (нет)"
+    fi
+}
+fileConfiguredPython=$(configuredPython)
+if [ -n "$YAMEM_PYTHON" ]; then
+    if probePython "$YAMEM_PYTHON"; then pythonCommand=$YAMEM_PYTHON; else noteCandidate "$YAMEM_PYTHON" "YAMEM_PYTHON="; fi
+elif [ -n "$fileConfiguredPython" ]; then
+    if probePython "$fileConfiguredPython"; then pythonCommand=$fileConfiguredPython; else noteCandidate "$fileConfiguredPython" "$LOCAL_CONFIG_NAME: "; fi
+else
+    for candidateCommand in python3 python "py -3"; do
+        if probePython "$candidateCommand"; then
+            pythonCommand=$candidateCommand
+            break
+        fi
+        noteCandidate "$candidateCommand" ""
+    done
+fi
+if [ -z "$pythonCommand" ]; then
+    environmentFailure "не найден рабочий Python >= $YAMEM_MIN_PYTHON." \
+        "пробовал: $triedCandidates" \
+        "варианты: 1) поставить Python 3 (Debian: apt install python3; Windows: winget install Python.Python.3.13)" \
+        "          2) указать интерпретатор один раз для этой машины:" \
+        "             sh $scriptDir/yamem --set-python \"<команда или путь>\" --memory ${memoryDir:-<путь к памяти>}" \
+        "          3) preflight вручную по SKILL.md, блок «Если стартера нет»"
+fi
+
+case "$1" in
+    --which-python)
+        echo "$pythonCommand"
+        exit 0 ;;
+    --check-env)
+        command -v git >/dev/null 2>&1 ||
+            environmentFailure "не найден git." "варианты: поставить git или preflight вручную без синхронизации"
+        configSource="автоопределение"
+        [ -n "$fileConfiguredPython" ] && configSource=$localConfigPath
+        [ -n "$YAMEM_PYTHON" ] && configSource="YAMEM_PYTHON"
+        echo "yamem: окружение в порядке — $pythonCommand (источник: $configSource), $(git --version)"
+        exit 0 ;;
+    "")
+        environmentFailure "не указан скрипт." "пример: sh $scriptDir/yamem start --memory <путь> --sid <sid> --part 1" ;;
+esac
+
+scriptName=$1
+shift
+case "$scriptName" in
+    start)      scriptName=yamem-start ;;
+    sync)       scriptName=yamem_sync ;;
+    repo-tails) scriptName=yamem-repo-tails ;;
+    hosts-hook) scriptName=yamem-hosts-hook ;;
+esac
+scriptPath="$scriptDir/${scriptName%.py}.py"
+[ -f "$scriptPath" ] ||
+    environmentFailure "нет скрипта $scriptPath." "доступны: $(cd "$scriptDir" && ls ./*.py | sed 's|^\./||; s|\.py$||' | tr '\n' ' ')"
+
+case "$scriptName" in
+    yamem-start|yamem_sync|yamem-repo-tails)
+        command -v git >/dev/null 2>&1 ||
+            environmentFailure "не найден git — синхронизация памяти невозможна." \
+                "варианты: 1) поставить git  2) preflight вручную по SKILL.md, блок «Если стартера нет»" ;;
+esac
+
+PYTHONIOENCODING=utf-8
+export PYTHONIOENCODING
+# shellcheck disable=SC2086
+exec $pythonCommand "$scriptPath" "$@"

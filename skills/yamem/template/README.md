@@ -30,10 +30,10 @@
 в README банка — из фронтматтеров топиков:
 
 ```bash
-python scripts/gen-backlog.py      --memory <путь к .agents/memory> --apply
-python scripts/gen-topics-index.py --memory <путь к .agents/memory> --apply
+sh scripts/yamem gen-backlog      --memory <путь к .agents/memory> --apply
+sh scripts/yamem gen-topics-index --memory <путь к .agents/memory> --apply
 ```
 
 Правка руками теряется при следующей сборке. Расхождение чинится в самой задаче или топике,
-после чего представление пересобирается — обязательно **после `python <навык>/scripts/yamem_sync.py <память>`**, иначе
+после чего представление пересобирается — обязательно **после `sh <навык>/scripts/yamem sync <память>`**, иначе
 своей сборкой откатишь задачи соседней сессии.

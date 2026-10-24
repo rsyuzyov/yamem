@@ -10,7 +10,7 @@
 # а правду показывают только сами задачи и топики.
 #
 # Проверка НЕ трогает файлы: коммит останавливается с подсказкой, что пересобрать.
-# Если генераторы не найдены, хук не мешает работать и просто выходит.
+# Генераторы или Python не найдены — коммит памяти стоит (обход: YAMEM_SKIP_CHECK=1).
 set -e
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
@@ -109,21 +109,46 @@ done
 if [ -z "$scripts" ]; then
     echo "yamem: генераторы не найдены — проверка представлений пропущена"
     echo "       (задай YAMEM_HOME=<каталог репозитория yamem>)"
-    exit 0
+    [ -n "$YAMEM_SKIP_CHECK" ] && exit 0
+    echo "       Коммит остановлен; разово пропустить: YAMEM_SKIP_CHECK=1 git commit ..."
+    exit 1
 fi
 
-# ⚠️ Выбирать интерпретатор проверкой запуском, а не `command -v`: на Windows
-# в PATH лежит заглушка `python3` из Microsoft Store — она существует, печатает
-# «Python» и возвращает 49, из-за чего проверка ложно «падала».
-python=""
-for candidate in python3 python py; do
-    if command -v "$candidate" >/dev/null 2>&1 &&
-       "$candidate" -c "import sys; sys.exit(0)" >/dev/null 2>&1; then
-        python="$candidate"
-        break
+# Интерпретатор выбирает запускатель `yamem` (пробный запуск python3/python/py -3,
+# заглушку Microsoft Store отсеивает, проверяет версию). ⛔ Не нашёл — коммит стоит:
+# прежнее `exit 0` пропускало коммит без единой проверки, молча и неотличимо от
+# «всё чисто» (тот же класс дефекта, что разобран в template/git-pre-commit.sh, п. 3).
+if [ -f "$scripts/yamem" ]; then
+    run_yamem() { sh "$scripts/yamem" "$@"; }
+    if ! sh "$scripts/yamem" --which-python >/dev/null; then
+        if [ -n "$YAMEM_SKIP_CHECK" ]; then
+            echo "yamem: проверки пропущены по YAMEM_SKIP_CHECK"
+            exit 0
+        fi
+        echo "yamem: коммит памяти остановлен — проверки запустить нечем (см. сбой выше)."
+        echo "       Разово пропустить: YAMEM_SKIP_CHECK=1 git commit ..."
+        exit 1
     fi
-done
-[ -n "$python" ] || exit 0
+    rebuild_hint() { echo "         sh \"$scripts/yamem\" $1 --memory \"$mem\" --apply"; }
+else
+    # Старая раскладка без запускателя: прежний выбор интерпретатора.
+    python=""
+    for candidate in python3 python py; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -c "import sys; sys.exit(0)" >/dev/null 2>&1; then
+            python="$candidate"
+            break
+        fi
+    done
+    if [ -z "$python" ]; then
+        [ -n "$YAMEM_SKIP_CHECK" ] && exit 0
+        echo "yamem: СБОЙ ОКРУЖЕНИЯ — нет рабочего Python, коммит памяти остановлен."
+        echo "       Разово пропустить: YAMEM_SKIP_CHECK=1 git commit ..."
+        exit 1
+    fi
+    run_yamem() { yamem_script=$1; shift; PYTHONIOENCODING=utf-8 "$python" "$scripts/$yamem_script.py" "$@"; }
+    rebuild_hint() { echo "         $python \"$scripts/$1.py\" --memory \"$mem\" --apply"; }
+fi
 
 # 🧭 Routing банков: маркер контура (хост, домен, учетка — из `markers` банка в конфиге)
 # в добавляемой строке ЧУЖОГО банка. В отчуждаемом банке (`alienable: true`) — утечка,
@@ -131,35 +156,35 @@ done
 # Без маркеров в конфиге скрипт молчит.
 routing_rc=0
 if [ -f "$scripts/check-bank-routing.py" ]; then
-    PYTHONIOENCODING=utf-8 "$python" "$scripts/check-bank-routing.py" --memory "$mem" || routing_rc=1
+    run_yamem check-bank-routing --memory "$mem" || routing_rc=1
 fi
 
 # ⚠️🔴 Переводы строк: текст с CRLF в индексе при `eol=lf` git считает измененным у всех сессий навсегда,
 # а синхронизация прячет такие файлы в autostash и не может вернуть (прецедент 16.10.2026: 14 тайников
 # за вечер, записи памяти уезжали туда же). Проверяются только файлы коммита. Обход: YAMEM_ALLOW_EOL=1.
 if [ -f "$scripts/check-eol.py" ]; then
-    PYTHONIOENCODING=utf-8 "$python" "$scripts/check-eol.py" || routing_rc=1
+    run_yamem check-eol || routing_rc=1
 fi
 [ -z "$bank" ] || exit "$routing_rc"
 
 rc=0
-PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-backlog.py" --memory "$mem" --check || rc=1
-PYTHONIOENCODING=utf-8 "$python" "$scripts/gen-topics-index.py" --memory "$mem" --check || rc=1
+run_yamem gen-backlog --memory "$mem" --check || rc=1
+run_yamem gen-topics-index --memory "$mem" --check || rc=1
 
 # ⚠️🔴 Управляющие символы в тексте — почти всегда путь Windows, съеденный оболочкой при
 # записи (`C:\1cv8` -> `C:` + 0x01 + `cv8`, `C:\temp` -> `C:` + табуляция + `emp`).
 # В markdown это НЕ видно: путь читается как правильный, но он нерабочий. Прецеденты:
 # 50 мест в 26 файлах (02.09.2026) и ещё 18 путей с табуляцией (10.09.2026).
 if [ -f "$scripts/check-control-chars.py" ]; then
-    PYTHONIOENCODING=utf-8 "$python" "$scripts/check-control-chars.py" || rc=1
+    run_yamem check-control-chars || rc=1
 fi
 
 if [ "$rc" -ne 0 ]; then
     echo
     echo "yamem: представления разошлись с источником — коммит остановлен."
     echo "       Пересобрать:"
-    echo "         $python \"$scripts/gen-backlog.py\" --memory \"$mem\" --apply"
-    echo "         $python \"$scripts/gen-topics-index.py\" --memory \"$mem\" --apply"
+    rebuild_hint gen-backlog
+    rebuild_hint gen-topics-index
     echo "       Жалобы на фронтматтер выше чинятся в самих задачах и топиках."
     exit 1
 fi

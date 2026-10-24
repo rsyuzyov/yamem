@@ -8,7 +8,16 @@
 # ⏱ Две вещи здесь сделаны ради скорости, и обе оплачены замером: этот хук
 # срабатывает на КАЖДОМ старте сессии, потому что стартер коммитит отметку
 # на доске, а на Windows любой лишний fork и glob стоят десятые доли секунды.
-gitleaks protect --staged --redact -v || exit 1
+# ⛔ Нет gitleaks — сказать прямо: иначе любой коммит, включая отметку стартера на доске,
+#    падает строкой «gitleaks: not found», и причину приходится угадывать.
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: СБОЙ ОКРУЖЕНИЯ — не найден gitleaks, проверка секретов невозможна, коммит остановлен."
+    echo "       Поставить: https://github.com/gitleaks/gitleaks#installing (Windows: winget install Gitleaks.Gitleaks)"
+    echo "       Разово пропустить проверку секретов: YAMEM_SKIP_GITLEAKS=1 git commit ..."
+    [ -n "$YAMEM_SKIP_GITLEAKS" ] || exit 1
+else
+    gitleaks protect --staged --redact -v || exit 1
+fi
 
 # 1. Отметка на доске (`.sessions/<sid>.md`) не влияет ни на представления,
 #    ни на индекс топиков — выходим ДО всякого поиска скрипта (−1.0 с).

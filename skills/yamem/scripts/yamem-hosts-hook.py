@@ -8,10 +8,12 @@
 
 Подключение (settings.json проекта), для Bash и PowerShell:
     "PostToolUse": [{"matcher": "Bash|PowerShell", "hooks": [{"type": "command",
-      "command": "python \"<проект>/.agents/skills/yamem/skills/yamem/scripts/yamem-hosts-hook.py\"",
+      "command": "sh \"<проект>/.agents/skills/yamem/skills/yamem/scripts/yamem\" hosts-hook",
       "timeout": 5}]}]
 
 Хук молчит и всегда выходит с 0: отметка — справочная, ломать ход сессии она не должна.
+⚠️ Звать через запускатель `yamem`, а не голым `python`: нет интерпретатора — запускатель
+выйдет с кодом 3 и сообщением, и пустое поле `hosts` перестанет быть тихим.
 Пишет только локальный файл; в git отметка уезжает со следующим стартом (стартер
 сохраняет накопленные `hosts`).
 """

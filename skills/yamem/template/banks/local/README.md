@@ -21,7 +21,7 @@
 ## Топики банка
 
 > Список собирается из фронтматтера топиков (`description` = когда сюда идти).
-> Сборка — `python scripts/gen-topics-index.py --memory <путь к .agents/memory> --apply`
+> Сборка — `sh scripts/yamem gen-topics-index --memory <путь к .agents/memory> --apply`
 > из репозитория yamem. Руками строки здесь не вести.
 
 <!-- yamem:topics-index:begin -->

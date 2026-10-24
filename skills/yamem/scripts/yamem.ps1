@@ -1,4 +1,4 @@
-﻿﻿# yamem: запускатель скриптов навыка для PowerShell — то же, что `scripts/yamem` для sh.
+﻿# yamem: запускатель скриптов навыка для PowerShell — то же, что `scripts/yamem` для sh.
 #
 #     & <навык>/scripts/yamem.ps1 start --memory <путь> --sid <sid> --part 1
 #     & <навык>/scripts/yamem.ps1 --check-env

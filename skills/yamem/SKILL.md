@@ -294,7 +294,7 @@ epic: perehod-na-platformu-edo-zapusk-v-boy
 **Сборка** — тем же каталогом скриптов, что и стартер (`<навык>/scripts/`, см. «При старте»):
 
 ```bash
-sh <навык>/scripts/yamem gen-backlog --memory <путь к .agents/memory> --apply
+sh "<навык>/scripts/yamem" gen-backlog --memory <путь к .agents/memory> --apply
 ```
 
 - Без `--apply` — сухой прогон: показывает, что изменится, и ничего не пишет.
@@ -360,7 +360,7 @@ description: Одно предложение про то, когда сюда в
 - 🔑 **Трогаешь топик — дописываешь фронтматтер, если его нет.** Новый топик заводится сразу с ним.
 - Раздел «База знаний» в `MEMORY.md` и списки топиков в README банков **генерируются из
   `description`** — руками там строки не вести (рукописный индекс расходится с правдой и
-  оплачивается каждой сессией). Сборка — `sh <навык>/scripts/yamem gen-topics-index --memory
+  оплачивается каждой сессией). Сборка — `sh "<навык>/scripts/yamem" gen-topics-index --memory
   <путь к .agents/memory> --apply`; она подставляет список между маркерами
   `<!-- yamem:topics-index:begin/end -->`, всё вне маркеров не трогает. Флаг `--check` даёт
   ненулевой код, если индекс разошёлся с топиками либо у топика **битый фронтматтер**:
@@ -390,10 +390,10 @@ description: Одно предложение про то, когда сюда в
 не нужно: подставь этот базовый каталог вместо `<навык>` ниже.
 
 ```bash
-sh <навык>/scripts/yamem start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --topic "<чем занимаешься>" --part 1
-sh <навык>/scripts/yamem start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --part 2
+sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --topic "<чем занимаешься>" --part 1
+sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --part 2
 ...
-sh <навык>/scripts/yamem start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --part 24
+sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --sid <первые 8 символов id сессии> --part 24
 ```
 
 ⚙️ **Скрипты навыка — только через запускатель `scripts/yamem`, голым `python` не звать.**
@@ -402,15 +402,20 @@ sh <навык>/scripts/yamem start --memory <путь к .agents/memory> --sid 
 переменная `YAMEM_PYTHON` → строка `python: <команда>` в `<память>/yamem.local.yaml` →
 пробный запуск `python3`, `python`, `py -3`. 🔑 `yamem.local.yaml` — машинный файл, в git не идёт
 (`.gitignore` памяти): одна память, разные машины. Нужен, только когда автоопределение не
-справилось; записывается командой `sh <навык>/scripts/yamem --set-python "<команда>" --memory <путь>`,
+справилось; записывается командой `sh "<навык>/scripts/yamem" --set-python "<команда>" --memory <путь>`,
 которая сперва проверяет интерпретатор. Проверить окружение без побочных действий —
-`sh <навык>/scripts/yamem --check-env`.
+`sh "<навык>/scripts/yamem" --check-env`.
 🎯 Прецеденты 23.10 и 24.10.2026: голый `python` дал 127 на всех частях стартера; в первый раз
 сессия перезапустила не все части и пошла работать без `MEMORY.md`.
 
-⚠️ **PowerShell.** Примеры навыка написаны для bash. Оболочка агента — PowerShell (Codex, Kimi Work
-на Windows) ⟹ тот же запускатель в виде `& <навык>/scripts/yamem.ps1 start …`, а bash-конструкции
-переводить, а не копировать: `2>/dev/null` → `2>$null`. ⛔🔴 **`>>` для файлов памяти в PowerShell
+⚠️ **Windows.** Путь к навыку там с обратными слэшами (`C:\Users\…\yamem`) — **всегда в кавычках**,
+как в примерах: без них bash съедает `\`, и путь превращается в `C:Users…`.
+- Bash-инструмент (Claude Code — это Git Bash) — тот же `sh "<навык>/scripts/yamem" …`.
+- Оболочка агента — PowerShell (Codex, Kimi Work) — запускатель `yamem.ps1`, с обходом политики
+  выполнения (на клиентских Windows по умолчанию `Restricted`, и `.ps1` не запустится вовсе):
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "<навык>\scripts\yamem.ps1" start …`.
+  Bash-конструкции переводить, а не копировать: `2>/dev/null` → `2>$null`.
+- cmd навык не использует. ⛔🔴 **`>>` для файлов памяти в PowerShell
 запрещён**: Windows PowerShell 5.1 дописывает в UTF-16, и файл ломается молча — дописывать
 `Add-Content -Encoding utf8` или правкой файла инструментом Edit.
 
@@ -807,7 +812,7 @@ agent: yan-eb
 1. **Дописывай в конец добавлением (`>>`), а не перезаписью файла целиком.**
    Инструмент, который переписывает файл (Write), для общих файлов памяти не годится — только
    append либо точечная правка конкретного фрагмента (Edit).
-2. **Перед записью — `sh <навык>/scripts/yamem sync <репозиторий памяти>`**, после записи —
+2. **Перед записью — `sh "<навык>/scripts/yamem" sync <репозиторий памяти>`**, после записи —
    сразу `git add` + `commit` + `push`. Чем меньше окно между чтением и коммитом, тем меньше шанс
    расхождения. Скрипт — это fetch + rebase на `@{u}`, сделанные безопасно для общей рабочей копии;
    ту же функцию зовёт стартер.
@@ -868,7 +873,7 @@ agent: yan-eb
 сессии — своя проверка:
 
 ```bash
-sh <навык>/scripts/yamem repo-tails --memory <путь> --since <сегодня> --sid <свой sid>
+sh "<навык>/scripts/yamem" repo-tails --memory <путь> --since <сегодня> --sid <свой sid>
 ```
 
 Оставляешь незакоммиченное намеренно (работа не закончена) — назови его в

@@ -33,7 +33,12 @@
 
 YAMEM_MIN_PYTHON="3.10"   # `dict | None` в сигнатурах, `removesuffix`
 LOCAL_CONFIG_NAME="yamem.local.yaml"
-case "$0" in */*) scriptDir=${0%/*} ;; *) scriptDir=. ;; esac
+# ⚠️ На Windows путь к навыку приходит и с обратными слэшами (`C:\Users\…\scripts\yamem`):
+# резать по последнему `/` ИЛИ `\`, иначе каталог скриптов определится как `.`.
+case "$0" in
+    */*|*\\*) scriptDir=$(printf '%s\n' "$0" | sed 's|[/\\][^/\\]*$||') ;;
+    *)        scriptDir=. ;;
+esac
 
 environmentFailure() {
     {

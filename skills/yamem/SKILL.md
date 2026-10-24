@@ -425,7 +425,9 @@ sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --si
 - Хук `hosts` в общем `settings.json` проекта написан под sh. На машине без Git Bash — переопределить его
   в машинном `.claude/settings.local.json` вариантом
   `{"type": "command", "shell": "powershell", "command": "& \"$env:CLAUDE_PROJECT_DIR\\.agents\\skills\\yamem\\skills\\yamem\\scripts\\yamem.ps1\" hosts-hook"}`.
-- cmd навык не использует. ⛔🔴 **`>>` для файлов памяти в PowerShell
+- cmd навык не использует.
+
+⛔🔴 **`>>` для файлов памяти в PowerShell
 запрещён**: Windows PowerShell 5.1 дописывает в UTF-16, и файл ломается молча — дописывать
 `Add-Content -Encoding utf8` или правкой файла инструментом Edit.
 

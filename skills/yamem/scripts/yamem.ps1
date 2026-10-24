@@ -42,9 +42,15 @@ $memoryArgument = $null
 for ($argumentIndex = 0; $argumentIndex -lt $args.Count - 1; $argumentIndex++) {
     if ($args[$argumentIndex] -eq '--memory') { $memoryArgument = [string]$args[$argumentIndex + 1] }
 }
+# ⚠️ PowerShell 5.1 при `ErrorActionPreference = 'Stop'` превращает stderr внешней
+# программы в исключение даже с `2>$null` — вне git-репозитория скрипт падал на
+# «fatal: not a git repository» (проверено 24.10.2026 на воркстейшене; pwsh 7 так не делает).
 $gitTopLevel = $null
 if (Get-Command git -ErrorAction SilentlyContinue) {
+    $ErrorActionPreference = 'Continue'
     $gitTopLevel = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0) { $gitTopLevel = $null }
+    $ErrorActionPreference = 'Stop'
 }
 $memoryCandidates = @($env:YAMEM_MEMORY, $memoryArgument)
 if ($args.Count -gt 1) { $memoryCandidates += [string]$args[1] }

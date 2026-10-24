@@ -415,6 +415,16 @@ sh "<навык>/scripts/yamem" start --memory <путь к .agents/memory> --si
   выполнения (на клиентских Windows по умолчанию `Restricted`, и `.ps1` не запустится вовсе):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "<навык>\scripts\yamem.ps1" start …`.
   Bash-конструкции переводить, а не копировать: `2>/dev/null` → `2>$null`.
+- ⚠️ **Без Git for Windows Claude Code сам переходит на инструмент PowerShell** (документация Claude Code,
+  «Set up on Windows»), и хуки с `command` без поля `shell` тоже идут в PowerShell. Там `sh` нет ⟹
+  только `yamem.ps1`. 🔴 `bash` в PowerShell на Windows — это обычно **WSL** (`C:\Windows\System32\bash.exe`),
+  а не Git Bash: звать его за sh нельзя, скрипты поедут в другую ОС с другими путями.
+- Git Bash установлен, но Claude Code его не видит — `CLAUDE_CODE_GIT_BASH_PATH` в `env` settings.json.
+- Сам git памяти нужен всегда (синхронизация, коммиты, доска сессий): нет git — запускатель останавливается
+  сбоем окружения. Git-хуки (pre-commit) Git for Windows запускает своим `sh`, от PATH это не зависит.
+- Хук `hosts` в общем `settings.json` проекта написан под sh. На машине без Git Bash — переопределить его
+  в машинном `.claude/settings.local.json` вариантом
+  `{"type": "command", "shell": "powershell", "command": "& \"$env:CLAUDE_PROJECT_DIR\\.agents\\skills\\yamem\\skills\\yamem\\scripts\\yamem.ps1\" hosts-hook"}`.
 - cmd навык не использует. ⛔🔴 **`>>` для файлов памяти в PowerShell
 запрещён**: Windows PowerShell 5.1 дописывает в UTF-16, и файл ломается молча — дописывать
 `Add-Content -Encoding utf8` или правкой файла инструментом Edit.
